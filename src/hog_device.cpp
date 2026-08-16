@@ -318,21 +318,21 @@ void HoggedDevice::restore() {
         setValue(streamId_, at(kAudioStreamPropertyVirtualFormat), originalVirtual_);
         savedFormats_ = false;
     }
+    // Depois dos formatos, porque a reconfiguração deles descarta escritas de volume; e
+    // ainda sob posse exclusiva, para que a escrita não dispute o device com outro processo.
+    if (originalVolume_ >= 0) {
+        if (!writeVolumeConfirmed(originalVolume_)) {
+            restoreError_ = "não consegui devolver o volume original ao device";
+        }
+        originalVolume_ = -1;
+    }
+
     if (hogged_) {
         const pid_t release = -1;
         if (setValue(deviceId_, at(kAudioDevicePropertyHogMode), release) != noErr) {
             restoreError_ = "não consegui liberar o modo exclusivo do device";
         }
         hogged_ = false;
-    }
-
-    // O volume vem por último: restaurar formato e rate dispara reconfiguração do device, e
-    // uma escrita feita antes dela terminar é descartada sem erro nenhum.
-    if (originalVolume_ >= 0) {
-        if (!writeVolumeConfirmed(originalVolume_)) {
-            restoreError_ = "não consegui devolver o volume original ao device";
-        }
-        originalVolume_ = -1;
     }
 }
 

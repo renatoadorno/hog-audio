@@ -191,7 +191,14 @@ std::string applyVolume(hog::HoggedDevice& hogged, const hog::OutputDevice& devi
         return {};
     }
 
-    const hog::CeilingDecision decision = hog::applyCeiling(device.volume, ceiling);
+    // O teto decide sobre o volume lido agora, não sobre o que havia antes de tomar o
+    // device: entre uma coisa e outra o usuário pode ter mexido no volume, e a reconfiguração
+    // do device também pode alterá-lo. Uma proteção que age sobre leitura velha não protege.
+    float current = device.volume;
+    double currentDecibels = 0;
+    if (!hogged.readVolume(current, currentDecibels)) current = device.volume;
+
+    const hog::CeilingDecision decision = hog::applyCeiling(current, ceiling);
     if (!decision.apply) {
         std::printf("volume   : %s (abaixo do teto de %.0f%%)\n",
                     describeAppliedVolume(hogged).c_str(), ceiling * 100.0);
@@ -200,12 +207,12 @@ std::string applyVolume(hog::HoggedDevice& hogged, const hog::OutputDevice& devi
 
     const float target = static_cast<float>(decision.scalar);
     if (std::string error = hogged.setVolume(target); !error.empty()) {
-        std::printf("aviso    : volume em %.0f%% e não consegui baixá-lo (%s)\n",
-                    device.volume * 100.0, error.c_str());
+        std::printf("aviso    : volume em %.0f%% e não consegui baixá-lo (%s)\n", current * 100.0,
+                    error.c_str());
         return {};
     }
     std::printf("volume   : %s [baixado do teto: estava em %.0f%%]\n",
-                describeAppliedVolume(hogged).c_str(), device.volume * 100.0);
+                describeAppliedVolume(hogged).c_str(), current * 100.0);
     return {};
 }
 
