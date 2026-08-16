@@ -12,6 +12,7 @@
 #include "format_negotiation.hpp"
 #include "hog_device.hpp"
 #include "ring_buffer.hpp"
+#include "volume.hpp"
 
 namespace {
 
@@ -146,12 +147,78 @@ void printDeviceReport(const hog::OutputDevice& device, const hog::AudioSource& 
     if (device.volume >= 0) std::printf("volume   : %.0f%%\n", device.volume * 100.0);
 }
 
+constexpr double kDefaultCeiling = 0.5;
+
+// Descreve o volume que o device realmente assumiu, lido do hardware. A conversão de escalar
+// para decibéis publicada pelo HAL não bate com a curva aplicada de fato, então exibir o
+// valor convertido daria um número plausível e errado.
+std::string describeAppliedVolume(const hog::HoggedDevice& hogged) {
+    char text[64];
+    float scalar = 0;
+    double decibels = 0;
+    if (hogged.readVolume(scalar, decibels)) {
+        std::snprintf(text, sizeof(text), "%.0f%% (%.1f dB)", scalar * 100.0, decibels);
+    } else {
+        std::snprintf(text, sizeof(text), "desconhecido");
+    }
+    return text;
+}
+
+// Um pedido explícito é uma garantia: se não der para cumprir, é melhor não tocar do que
+// tocar mais alto do que se pediu. Já o teto é uma rede de proteção — não havendo controle
+// de volume, avisa e segue, que é o comportamento de sempre.
+std::string applyVolume(hog::HoggedDevice& hogged, const hog::OutputDevice& device,
+                        bool hasRequest, const hog::VolumeRequest& request, double ceiling) {
+    if (hasRequest) {
+        float scalar = 0;
+        if (request.unit == hog::VolumeUnit::Percent) {
+            scalar = static_cast<float>(request.value);
+        } else if (!hogged.decibelsToScalar(request.value, scalar)) {
+            return "este device não converte decibéis; use porcentagem";
+        }
+
+        const float before = device.volume;
+        if (std::string error = hogged.setVolume(scalar); !error.empty()) return error;
+
+        std::printf("volume   : %s", describeAppliedVolume(hogged).c_str());
+        if (before >= 0) std::printf(" [era %.0f%%]", before * 100.0);
+        std::printf("\n");
+        return {};
+    }
+
+    if (device.volume < 0) {
+        std::printf("volume   : device sem controle de volume; teto não aplicável\n");
+        return {};
+    }
+
+    const hog::CeilingDecision decision = hog::applyCeiling(device.volume, ceiling);
+    if (!decision.apply) {
+        std::printf("volume   : %s (abaixo do teto de %.0f%%)\n",
+                    describeAppliedVolume(hogged).c_str(), ceiling * 100.0);
+        return {};
+    }
+
+    const float target = static_cast<float>(decision.scalar);
+    if (std::string error = hogged.setVolume(target); !error.empty()) {
+        std::printf("aviso    : volume em %.0f%% e não consegui baixá-lo (%s)\n",
+                    device.volume * 100.0, error.c_str());
+        return {};
+    }
+    std::printf("volume   : %s [baixado do teto: estava em %.0f%%]\n",
+                describeAppliedVolume(hogged).c_str(), device.volume * 100.0);
+    return {};
+}
+
 int usage() {
     std::fprintf(stderr,
-                 "uso: hog-audio [--info] <arquivo>\n\n"
+                 "uso: hog-audio [--info] [--volume V] [--max-volume V] <arquivo>\n\n"
                  "  Reproduz o arquivo tomando o DAC em modo exclusivo, travado no sample\n"
                  "  rate e no bit depth do próprio arquivo. Ctrl+C interrompe.\n\n"
-                 "  --info  mostra o que seria negociado, sem tocar no device\n");
+                 "  --info          mostra o que seria negociado, sem tocar no device\n"
+                 "  --volume V      volume da reprodução: 35, 35%% ou -18dB\n"
+                 "  --max-volume V  teto aplicado quando --volume é omitido (padrão 50%%)\n\n"
+                 "  O volume é ajustado depois de tomar o device e antes de sair som, e é\n"
+                 "  devolvido ao valor anterior ao terminar.\n");
     return 2;
 }
 
@@ -169,12 +236,35 @@ int main(int argc, char** argv) {
 
     std::string path;
     bool infoOnly = false;
+    bool hasVolumeRequest = false;
+    hog::VolumeRequest volumeRequest;
+    double ceiling = kDefaultCeiling;
+
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
         if (arg == "--info") {
             infoOnly = true;
         } else if (arg == "-h" || arg == "--help") {
             return usage();
+        } else if (arg == "--volume" || arg == "--max-volume") {
+            if (i + 1 >= argc) {
+                std::fprintf(stderr, "erro: %s exige um valor\n", arg.c_str());
+                return 2;
+            }
+            const hog::VolumeRequest parsed = hog::parseVolume(argv[++i]);
+            if (!parsed.valid) {
+                std::fprintf(stderr, "erro: %s\n", parsed.reason.c_str());
+                return 2;
+            }
+            if (arg == "--volume") {
+                volumeRequest = parsed;
+                hasVolumeRequest = true;
+            } else if (parsed.unit != hog::VolumeUnit::Percent) {
+                std::fprintf(stderr, "erro: --max-volume aceita só porcentagem\n");
+                return 2;
+            } else {
+                ceiling = parsed.value;
+            }
         } else if (path.empty()) {
             path = arg;
         } else {
@@ -212,6 +302,14 @@ int main(int argc, char** argv) {
     const AudioStreamBasicDescription& physical =
         device.physicalFormats[static_cast<std::size_t>(decision.physicalFormatIndex)];
     if (std::string error = hogged.acquire(device, decision.sampleRate, physical);
+        !error.empty()) {
+        std::fprintf(stderr, "erro: %s\n", error.c_str());
+        return 1;
+    }
+
+    // O volume é resolvido aqui, com o device já nosso e antes de qualquer amostra sair: é o
+    // único ponto em que dá para garantir que o fone não receba o volume anterior.
+    if (std::string error = applyVolume(hogged, device, hasVolumeRequest, volumeRequest, ceiling);
         !error.empty()) {
         std::fprintf(stderr, "erro: %s\n", error.c_str());
         return 1;

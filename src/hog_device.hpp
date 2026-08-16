@@ -43,6 +43,19 @@ public:
     const AudioStreamBasicDescription& streamFormat() const { return streamFormat_; }
     bool virtualFormatLocked() const { return virtualFormatLocked_; }
 
+    // Ajusta o volume do device e guarda o anterior para devolvê-lo junto com o resto do
+    // estado. Chamar antes de start(): depois, som já teria saído no volume antigo.
+    // `scalar` vai de 0 a 1. Devolve mensagem de erro; vazia em caso de sucesso.
+    std::string setVolume(float scalar);
+
+    // Converte pela curva do próprio amplificador. Só existe neste sentido: a conversão
+    // inversa publicada pelo HAL não corresponde ao que o device de fato aplica, então o
+    // valor em decibéis para exibição vem de readVolume(), lido do hardware.
+    bool decibelsToScalar(double decibels, float& scalar) const;
+
+    // Estado real do volume depois de aplicado.
+    bool readVolume(float& scalar, double& decibels) const;
+
     std::string start(AudioDeviceIOProc proc, void* context);
     void stop();
 
@@ -54,6 +67,12 @@ public:
 private:
     void restore();
 
+    // Escreve o volume e confirma lendo de volta. O HAL descarta a primeira escrita logo
+    // após uma reconfiguração de formato — devolvendo noErr e, pior, um valor de cache que
+    // faz a conferência imediata passar. Sem isto, o volume pedido pode simplesmente não
+    // valer, e o som sai no volume anterior.
+    bool writeVolumeConfirmed(float target);
+
     AudioObjectID deviceId_ = kAudioObjectUnknown;
     AudioObjectID streamId_ = kAudioObjectUnknown;
     AudioDeviceIOProcID procId_ = nullptr;
@@ -64,6 +83,7 @@ private:
     bool virtualFormatLocked_ = false;
 
     std::string restoreError_;
+    float originalVolume_ = -1;  // negativo enquanto nada foi alterado
     double originalRate_ = 0;
     AudioStreamBasicDescription originalPhysical_{};
     AudioStreamBasicDescription originalVirtual_{};

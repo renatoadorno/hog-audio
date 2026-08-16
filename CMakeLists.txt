@@ -22,6 +22,7 @@ endif()
 # Núcleo puro: nenhuma dependência de framework, para que os testes rodem sem hardware.
 add_library(hog_core STATIC
     src/format_negotiation.cpp
+    src/volume.cpp
 )
 target_include_directories(hog_core PUBLIC src)
 
@@ -39,7 +40,7 @@ target_link_libraries(hog-audio PRIVATE
 
 enable_testing()
 
-foreach(test_name format_negotiation ring_buffer)
+foreach(test_name format_negotiation ring_buffer volume)
     add_executable(test_${test_name} tests/test_${test_name}.cpp)
     target_link_libraries(test_${test_name} PRIVATE hog_core)
     target_include_directories(test_${test_name} PRIVATE tests)

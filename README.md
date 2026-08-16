@@ -37,6 +37,37 @@ tocando  : 203.5 s — Ctrl+C interrompe
 `--info` mostra a mesma negociação sem tocar no device — útil para conferir um arquivo antes
 de interromper o áudio do sistema.
 
+## Volume
+
+A saída de fone do Mac entrega tensão suficiente para machucar tanto o ouvido quanto o fone
+quando fica no máximo. O volume é ajustado **depois de tomar o device e antes de qualquer som
+sair**, e devolvido ao valor anterior no fim.
+
+```
+--volume 35        35% do controle, como o slider do sistema
+--volume -18dB     atenuação exata de 18 dB
+--max-volume 60    muda o teto de segurança (padrão 50%)
+```
+
+Sem `--volume`, o volume só é tocado se estiver acima do teto — assim esquecer a flag não
+significa levar o volume cheio no fone.
+
+Os decibéis vêm do amplificador, não de uma fórmula: pedir `-30dB` resulta em exatamente
+−30,0 dB no device. O número exibido é sempre lido do hardware depois de aplicado, porque a
+conversão de escalar para decibéis que o HAL publica **não corresponde** à curva que ele de
+fato aplica — ela informaria −50,8 dB onde o device está a −35,1 dB.
+
+Duas armadilhas do Core Audio que este código contorna, ambas observadas neste Mac:
+
+- A primeira escrita de volume após uma reconfiguração de formato é **descartada em
+  silêncio**: devolve `noErr` e a leitura seguinte ainda retorna o valor pedido, vindo de
+  cache. Sem confirmar com uma releitura atrasada, o volume simplesmente não valeria — e o
+  som sairia no volume anterior. Por isso um pedido explícito que não possa ser confirmado
+  aborta a reprodução em vez de tocar.
+- Enquanto o device está tomado, o macOS aponta o **"dispositivo de saída padrão" para outro
+  device**. Ferramentas que leem "o default" (inclusive `system_profiler`) mostram o volume
+  do device errado durante a reprodução.
+
 ## Por que float32 continua sendo bit-perfect
 
 O IOProc recebe os frames no *formato virtual* do stream. No áudio interno do Apple Silicon
@@ -52,7 +83,7 @@ coisa, e é o que este programa evita:
 |---|---|
 | Resample (SRC) | O device é travado no rate do arquivo; sem rate compatível, não toca |
 | Mixagem com outros apps | Hog mode exclusivo |
-| Volume aplicado em software | Não mexemos no volume; no áudio interno do Mac ele age no amplificador |
+| Volume aplicado em software | O controle usado é o do amplificador, o mesmo do slider do sistema |
 
 Para arquivos acima de 24 bits o programa recusa o formato float32, porque aí a conversão
 deixaria de ser exata.
@@ -101,6 +132,7 @@ alterado, corrigível tocando qualquer outra coisa ou pelo Configuração de Áu
 
 ```
 src/format_negotiation.*  decide rate e formato — puro, sem Core Audio, coberto por testes
+src/volume.*              interpreta o volume pedido e o teto — puro, coberto por testes
 src/ring_buffer.hpp       fila sem locks entre o decodificador e a thread de tempo real
 src/audio_source.*        decodificação via ExtendedAudioFile
 src/hog_device.*          HAL: modo exclusivo, lock de formato, IOProc, restauração via RAII
@@ -116,6 +148,7 @@ mais importa e a única que dá para verificar sem plugar um fone.
 make test        # testes do núcleo puro
 make test-asan   # os mesmos testes sob AddressSanitizer e UBSan
 make info FILE=musicas/faixa.flac
+make play FILE=musicas/faixa.flac
 ```
 
 O IOProc roda em thread de tempo real: dentro dele só existem `memcpy` e operações atômicas —

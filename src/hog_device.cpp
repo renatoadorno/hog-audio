@@ -202,6 +202,81 @@ std::string HoggedDevice::acquire(const OutputDevice& device, double rate,
     return {};
 }
 
+bool HoggedDevice::decibelsToScalar(double decibels, float& scalar) const {
+    Float32 value = static_cast<Float32>(decibels);
+    UInt32 size = sizeof(value);
+    const auto address =
+        at(kAudioDevicePropertyVolumeDecibelsToScalar, kAudioObjectPropertyScopeOutput);
+    if (AudioObjectGetPropertyData(deviceId_, &address, 0, nullptr, &size, &value) != noErr) {
+        return false;
+    }
+    scalar = value;
+    return true;
+}
+
+bool HoggedDevice::readVolume(float& scalar, double& decibels) const {
+    Float32 s = -1;
+    UInt32 size = sizeof(s);
+    const auto scalarAddress = at(kAudioDevicePropertyVolumeScalar, kAudioObjectPropertyScopeOutput);
+    if (AudioObjectGetPropertyData(deviceId_, &scalarAddress, 0, nullptr, &size, &s) != noErr) {
+        return false;
+    }
+    scalar = s;
+
+    Float32 db = 0;
+    size = sizeof(db);
+    const auto dbAddress = at(kAudioDevicePropertyVolumeDecibels, kAudioObjectPropertyScopeOutput);
+    if (AudioObjectGetPropertyData(deviceId_, &dbAddress, 0, nullptr, &size, &db) != noErr) {
+        return false;
+    }
+    decibels = db;
+    return true;
+}
+
+bool HoggedDevice::writeVolumeConfirmed(float target) {
+    const auto address = at(kAudioDevicePropertyVolumeScalar, kAudioObjectPropertyScopeOutput);
+    for (int attempt = 0; attempt < 20; ++attempt) {
+        setValue(deviceId_, address, target);
+        // A confirmação precisa vir depois de uma pausa: ler imediatamente devolve o valor
+        // que acabamos de escrever, mesmo quando o device não o assumiu.
+        std::this_thread::sleep_for(std::chrono::milliseconds(30));
+        Float32 current = -1;
+        if (getValue(deviceId_, address, current) == noErr &&
+            std::fabs(current - target) < 0.005f) {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::string HoggedDevice::setVolume(float scalar) {
+    if (scalar < 0) scalar = 0;
+    if (scalar > 1) scalar = 1;
+
+    const auto address = at(kAudioDevicePropertyVolumeScalar, kAudioObjectPropertyScopeOutput);
+    if (!AudioObjectHasProperty(deviceId_, &address)) {
+        return "este device não expõe controle de volume";
+    }
+
+    Boolean settable = false;
+    if (AudioObjectIsPropertySettable(deviceId_, &address, &settable) != noErr || !settable) {
+        return "o volume deste device não é ajustável por software";
+    }
+
+    if (originalVolume_ < 0) {  // só a primeira mudança define o que restaurar
+        Float32 current = 0;
+        if (getValue(deviceId_, address, current) != noErr) {
+            return "não consegui ler o volume atual para poder restaurá-lo depois";
+        }
+        originalVolume_ = current;
+    }
+
+    if (!writeVolumeConfirmed(scalar)) {
+        return "o device não assumiu o volume pedido; não vou tocar sem essa garantia";
+    }
+    return {};
+}
+
 std::string HoggedDevice::start(AudioDeviceIOProc proc, void* context) {
     OSStatus status = AudioDeviceCreateIOProcID(deviceId_, proc, context, &procId_);
     if (status != noErr || procId_ == nullptr) {
@@ -249,6 +324,15 @@ void HoggedDevice::restore() {
             restoreError_ = "não consegui liberar o modo exclusivo do device";
         }
         hogged_ = false;
+    }
+
+    // O volume vem por último: restaurar formato e rate dispara reconfiguração do device, e
+    // uma escrita feita antes dela terminar é descartada sem erro nenhum.
+    if (originalVolume_ >= 0) {
+        if (!writeVolumeConfirmed(originalVolume_)) {
+            restoreError_ = "não consegui devolver o volume original ao device";
+        }
+        originalVolume_ = -1;
     }
 }
 
