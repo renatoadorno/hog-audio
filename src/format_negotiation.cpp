@@ -41,6 +41,16 @@ bool preservesEveryBit(const PhysicalFormatDesc& fmt, unsigned fileBitDepth) {
     return fmt.bitsPerChannel >= fileBitDepth;
 }
 
+// Um formato serve à taxa pedida se a declara diretamente ou se publica uma faixa contínua
+// que a contém — o caso das interfaces profissionais, que anunciam a faixa em vez de listar
+// cada taxa.
+bool formatCoversRate(const PhysicalFormatDesc& fmt, double rate) {
+    if (fmt.sampleRateMaximum > fmt.sampleRateMinimum) {
+        return rate >= fmt.sampleRateMinimum - 0.5 && rate <= fmt.sampleRateMaximum + 0.5;
+    }
+    return sameRate(fmt.sampleRate, rate);
+}
+
 // Entre os formatos íntegros: inteiro ganha de float, e o menor bit depth suficiente ganha
 // dos maiores — trocar bits de largura não perde informação, mas o menor é o mais direto.
 bool isBetter(const PhysicalFormatDesc& candidate, const PhysicalFormatDesc& current) {
@@ -98,7 +108,7 @@ Decision negotiate(const FileFormat& file, const DeviceCaps& caps) {
 
     const PhysicalFormatDesc* best = nullptr;
     for (const auto& fmt : caps.physicalFormats) {
-        if (!sameRate(fmt.sampleRate, file.sampleRate)) continue;
+        if (!formatCoversRate(fmt, file.sampleRate)) continue;
         if (!preservesEveryBit(fmt, file.bitDepth)) continue;
         if (best == nullptr || isBetter(fmt, *best)) best = &fmt;
     }

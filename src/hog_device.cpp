@@ -104,6 +104,10 @@ std::string queryDefaultOutputDevice(OutputDevice& out) {
         PhysicalFormatDesc desc{};
         desc.index = static_cast<int>(out.physicalFormats.size());
         desc.sampleRate = f.mSampleRate > 0 ? f.mSampleRate : ranged.mSampleRateRange.mMinimum;
+        // Formatos de faixa contínua trazem mSampleRate zerado e a faixa aqui. Colapsá-la no
+        // mínimo faria o device recusar toda taxa válida que não fosse o extremo inferior.
+        desc.sampleRateMinimum = ranged.mSampleRateRange.mMinimum;
+        desc.sampleRateMaximum = ranged.mSampleRateRange.mMaximum;
         desc.sampleType =
             (f.mFormatFlags & kAudioFormatFlagIsFloat) ? SampleType::Float : SampleType::Integer;
         desc.bitsPerChannel = f.mBitsPerChannel;
@@ -131,6 +135,11 @@ HoggedDevice::~HoggedDevice() {
     restore();
 }
 
+std::string HoggedDevice::finish() {
+    restore();
+    return restoreError_;
+}
+
 std::string HoggedDevice::acquire(const OutputDevice& device, double rate,
                                   const AudioStreamBasicDescription& physical) {
     // Uma segunda aquisição gravaria o estado já modificado por cima do original, e a
@@ -156,12 +165,15 @@ std::string HoggedDevice::acquire(const OutputDevice& device, double rate,
     if (status != noErr) {
         return "não consegui tomar o device em modo exclusivo: " + osStatusText(status);
     }
+    // Marcado antes de conferir o dono: se o set funcionou, a liberação é nossa obrigação
+    // mesmo que a releitura discorde.
+    hogged_ = true;
+
     pid_t owner = -1;
     getValue(deviceId_, at(kAudioDevicePropertyHogMode), owner);
     if (owner != me) {
         return "o device já está tomado pelo processo " + std::to_string(owner);
     }
-    hogged_ = true;
 
     if (!sameRate(device.nominalRate, rate)) {
         status = setValue(deviceId_, at(kAudioDevicePropertyNominalSampleRate), rate);
@@ -171,14 +183,18 @@ std::string HoggedDevice::acquire(const OutputDevice& device, double rate,
         }
     }
 
-    status = setValue(streamId_, at(kAudioStreamPropertyPhysicalFormat), physical);
+    // Formatos de faixa contínua chegam com a taxa zerada; é aqui que ela vira concreta.
+    AudioStreamBasicDescription target = physical;
+    target.mSampleRate = rate;
+
+    status = setValue(streamId_, at(kAudioStreamPropertyPhysicalFormat), target);
     if (status != noErr) return "o device recusou o formato físico: " + osStatusText(status);
 
     // O ideal é o IOProc ver exatamente o formato físico. Muitos devices recusam e mantêm
     // float32 no formato virtual — o que ainda preserva os bits, porque a conversão de
     // inteiro de até 24 bits para float32 e de volta é exata.
     virtualFormatLocked_ =
-        setValue(streamId_, at(kAudioStreamPropertyVirtualFormat), physical) == noErr;
+        setValue(streamId_, at(kAudioStreamPropertyVirtualFormat), target) == noErr;
 
     if (getValue(streamId_, at(kAudioStreamPropertyVirtualFormat), streamFormat_) != noErr) {
         return "não consegui ler o formato que o device vai entregar ao callback";
@@ -212,14 +228,26 @@ void HoggedDevice::restore() {
         procId_ = nullptr;
     }
     if (savedFormats_) {
+        // Espelha a ordem de acquire(): o rate primeiro, confirmado, e só então os formatos.
+        // Aplicar formato enquanto o device ainda está no rate negociado escreveria sobre um
+        // estado prestes a mudar — a mesma razão pela qual acquire() espera.
+        if (setValue(deviceId_, at(kAudioDevicePropertyNominalSampleRate), originalRate_) !=
+                noErr ||
+            !waitForRate(deviceId_, originalRate_)) {
+            restoreError_ = "não consegui devolver o sample rate original ao device";
+        }
+        if (setValue(streamId_, at(kAudioStreamPropertyPhysicalFormat), originalPhysical_) !=
+            noErr) {
+            restoreError_ = "não consegui devolver o formato físico original ao device";
+        }
         setValue(streamId_, at(kAudioStreamPropertyVirtualFormat), originalVirtual_);
-        setValue(streamId_, at(kAudioStreamPropertyPhysicalFormat), originalPhysical_);
-        setValue(deviceId_, at(kAudioDevicePropertyNominalSampleRate), originalRate_);
         savedFormats_ = false;
     }
     if (hogged_) {
         const pid_t release = -1;
-        setValue(deviceId_, at(kAudioDevicePropertyHogMode), release);
+        if (setValue(deviceId_, at(kAudioDevicePropertyHogMode), release) != noErr) {
+            restoreError_ = "não consegui liberar o modo exclusivo do device";
+        }
         hogged_ = false;
     }
 }

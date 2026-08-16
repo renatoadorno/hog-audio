@@ -32,6 +32,8 @@ public:
     ~HoggedDevice();
     HoggedDevice(const HoggedDevice&) = delete;
     HoggedDevice& operator=(const HoggedDevice&) = delete;
+    HoggedDevice(HoggedDevice&&) = delete;
+    HoggedDevice& operator=(HoggedDevice&&) = delete;
 
     std::string acquire(const OutputDevice& device, double rate,
                         const AudioStreamBasicDescription& physical);
@@ -43,6 +45,11 @@ public:
 
     std::string start(AudioDeviceIOProc proc, void* context);
     void stop();
+
+    // Devolve o device ao estado original agora, em vez de esperar o destrutor, e informa o
+    // que falhou. Sem isto não haveria como distinguir uma restauração bem-sucedida de uma
+    // que deixou o device alterado. Chamar de novo (ou pelo destrutor) não repete o trabalho.
+    std::string finish();
 
 private:
     void restore();
@@ -56,6 +63,7 @@ private:
     AudioStreamBasicDescription streamFormat_{};
     bool virtualFormatLocked_ = false;
 
+    std::string restoreError_;
     double originalRate_ = 0;
     AudioStreamBasicDescription originalPhysical_{};
     AudioStreamBasicDescription originalVirtual_{};

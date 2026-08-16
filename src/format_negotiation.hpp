@@ -19,6 +19,12 @@ struct PhysicalFormatDesc {
     SampleType sampleType;
     unsigned bitsPerChannel;
     unsigned channels;
+
+    // Interfaces profissionais publicam formatos com faixa contínua em vez de uma taxa fixa.
+    // Quando o máximo excede o mínimo, qualquer taxa dentro da faixa serve; zerados, apenas
+    // `sampleRate` vale.
+    double sampleRateMinimum = 0;
+    double sampleRateMaximum = 0;
 };
 
 // Devices podem publicar rates discretos (minimum == maximum) ou faixas contínuas.

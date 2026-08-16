@@ -41,6 +41,32 @@ void rate_dentro_de_range_continuo_e_aceito() {
     CHECK_EQ(d.sampleRate, 176400.0);
 }
 
+// Interfaces profissionais publicam o formato físico com faixa contínua em vez de uma taxa
+// fixa. Recusar só porque a taxa do arquivo não é o extremo da faixa seria um falso negativo.
+void formato_fisico_de_faixa_continua_aceita_taxa_interna() {
+    PhysicalFormatDesc contínuo{0, 44100, SampleType::Integer, 24, 2};
+    contínuo.sampleRateMinimum = 44100;
+    contínuo.sampleRateMaximum = 192000;
+    DeviceCaps caps{{{44100, 192000}}, {contínuo}, 2};
+
+    auto d = negotiate(FileFormat{96000, 24, 2}, caps);
+
+    CHECK(d.play);
+    CHECK_EQ(d.sampleRate, 96000.0);
+    CHECK_EQ(d.physicalFormatIndex, 0);
+}
+
+void formato_fisico_de_faixa_continua_recusa_taxa_fora_da_faixa() {
+    PhysicalFormatDesc contínuo{0, 44100, SampleType::Integer, 24, 2};
+    contínuo.sampleRateMinimum = 44100;
+    contínuo.sampleRateMaximum = 96000;
+    DeviceCaps caps{{{44100, 192000}}, {contínuo}, 2};
+
+    auto d = negotiate(FileFormat{192000, 24, 2}, caps);
+
+    CHECK(!d.play);
+}
+
 void rate_nao_suportado_aborta() {
     auto d = negotiate(FileFormat{192000, 24, 2}, builtInLike());
 
@@ -181,6 +207,8 @@ int main() {
     formato_degenerado_e_recusado();
     rate_exatamente_suportado_e_aceito();
     rate_dentro_de_range_continuo_e_aceito();
+    formato_fisico_de_faixa_continua_aceita_taxa_interna();
+    formato_fisico_de_faixa_continua_recusa_taxa_fora_da_faixa();
     rate_nao_suportado_aborta();
     arquivo_16_bits_usa_formato_de_24_quando_e_o_unico();
     escolhe_o_menor_bit_depth_que_comporta_o_arquivo();

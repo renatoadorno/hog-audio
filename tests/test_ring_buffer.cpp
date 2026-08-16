@@ -169,9 +169,69 @@ void produtor_e_consumidor_concorrentes_preservam_a_sequencia() {
     CHECK_EQ(lido, kTotal);
 }
 
+// --- alinhamento de frame na leitura -------------------------------------------------
+// O produtor escreve bytes crus e pode parar no meio de um frame quando o buffer enche.
+// Se o callback consumir esse resto parcial, o índice de leitura sai de fase com a
+// fronteira de frame e NÃO volta: da próxima leitura em diante, bytes do canal esquerdo
+// são lidos como direito. O sintoma é ruído, e é permanente.
+
+void leitura_alinhada_descarta_o_frame_parcial() {
+    // 20 bytes disponíveis com frames de 6 bytes: só 18 podem ser consumidos.
+    CHECK_EQ(alignedReadSize(24, 20, 6), size_t{18});
+}
+
+void leitura_alinhada_respeita_o_que_foi_pedido() {
+    CHECK_EQ(alignedReadSize(24, 100, 6), size_t{24});
+    CHECK_EQ(alignedReadSize(24, 24, 6), size_t{24});
+}
+
+void sem_um_frame_completo_nao_se_le_nada() {
+    CHECK_EQ(alignedReadSize(24, 4, 6), size_t{0});
+    CHECK_EQ(alignedReadSize(24, 0, 6), size_t{0});
+}
+
+void frames_potencia_de_dois_tambem_sao_alinhados() {
+    CHECK_EQ(alignedReadSize(24, 20, 8), size_t{16});
+}
+
+void frame_degenerado_nao_le_nada() {
+    CHECK_EQ(alignedReadSize(24, 20, 0), size_t{0});
+}
+
+// O caso que o desalinhamento provoca de verdade: depois de um underrun com resto parcial,
+// a leitura seguinte tem de começar exatamente onde um frame começa.
+void fase_do_frame_sobrevive_a_um_underrun() {
+    constexpr unsigned kFrame = 6;  // 24 bits, 2 canais — não é potência de dois
+    RingBuffer rb(64);
+
+    auto dados = sequence(20);  // 3 frames completos + 2 bytes soltos
+    rb.write(dados.data(), dados.size());
+
+    std::vector<uint8_t> saida(24, 0xFF);
+    const size_t primeira = alignedReadSize(24, rb.availableToRead(), kFrame);
+    CHECK_EQ(rb.read(saida.data(), primeira), size_t{18});
+
+    // Chega o resto do fluxo; a próxima leitura tem de retomar no byte 18, início de frame.
+    auto resto = sequence(10, 20);
+    rb.write(resto.data(), resto.size());
+
+    std::vector<uint8_t> segunda(12, 0);
+    const size_t n = alignedReadSize(12, rb.availableToRead(), kFrame);
+    rb.read(segunda.data(), n);
+
+    CHECK_EQ(segunda[0], uint8_t{18});  // e não 20, que seria a fase perdida
+    CHECK_EQ(segunda[1], uint8_t{19});
+}
+
 }  // namespace
 
 int main() {
+    leitura_alinhada_descarta_o_frame_parcial();
+    leitura_alinhada_respeita_o_que_foi_pedido();
+    sem_um_frame_completo_nao_se_le_nada();
+    frames_potencia_de_dois_tambem_sao_alinhados();
+    frame_degenerado_nao_le_nada();
+    fase_do_frame_sobrevive_a_um_underrun();
     buffer_novo_esta_vazio();
     capacidade_e_arredondada_para_potencia_de_dois();
     o_que_entra_e_o_que_sai();

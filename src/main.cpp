@@ -1,3 +1,4 @@
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <csignal>
@@ -14,10 +15,17 @@
 
 namespace {
 
-volatile std::sig_atomic_t g_interrupted = 0;
+// Atômico, não apenas volatile: além do handler de sinal, a thread produtora e a principal
+// leem esta flag, e volatile não garante visibilidade entre threads. std::atomic<int> é
+// lock-free nesta plataforma, portanto continua seguro dentro de um handler.
+std::atomic<int> g_interrupted{0};
 
 void onInterrupt(int) {
-    g_interrupted = 1;  // a limpeza é do main: o handler não pode chamar Core Audio
+    g_interrupted.store(1, std::memory_order_relaxed);  // a limpeza é do main
+}
+
+bool interrupted() {
+    return g_interrupted.load(std::memory_order_relaxed) != 0;
 }
 
 // Estado compartilhado entre a thread que decodifica e o IOProc de tempo real.
@@ -54,7 +62,9 @@ OSStatus ioProc(AudioObjectID, const AudioTimeStamp*, const AudioBufferList*,
     if (!p->nonInterleaved) {
         AudioBuffer& buffer = outputData->mBuffers[0];
         const std::size_t need = buffer.mDataByteSize;
-        const std::size_t got = p->ring.read(buffer.mData, need);
+        const std::size_t take =
+            hog::alignedReadSize(need, p->ring.availableToRead(), p->bytesPerFrame);
+        const std::size_t got = p->ring.read(buffer.mData, take);
         if (got < need) std::memset(static_cast<std::uint8_t*>(buffer.mData) + got, 0, need - got);
         if (got < need && p->producerDone.load(std::memory_order_acquire)) {
             p->finished.store(true, std::memory_order_release);
@@ -72,7 +82,9 @@ OSStatus ioProc(AudioObjectID, const AudioTimeStamp*, const AudioBufferList*,
         return noErr;
     }
 
-    const std::size_t got = p->ring.read(p->scratch.data(), need);
+    const std::size_t take =
+        hog::alignedReadSize(need, p->ring.availableToRead(), p->bytesPerFrame);
+    const std::size_t got = p->ring.read(p->scratch.data(), take);
     if (got < need) std::memset(p->scratch.data() + got, 0, need - got);
 
     // Desintercala: o ring guarda LRLRLR..., o device quer um buffer por canal. Buffers além
@@ -148,6 +160,12 @@ int usage() {
 int main(int argc, char** argv) {
     // Sem isto, redirecionar a saída embaralha a ordem entre stdout e stderr.
     std::setvbuf(stdout, nullptr, _IOLBF, 0);
+
+    // Antes de qualquer coisa que altere o device. Entre tomar o device e instalar os
+    // handlers existiria uma janela em que um Ctrl+C mataria o processo pela disposição
+    // padrão, sem rodar destrutor nenhum — e o sample rate ficaria trocado.
+    // SIGHUP cobre o terminal sendo fechado; SIGQUIT, o Ctrl+\.
+    for (int sig : {SIGINT, SIGTERM, SIGHUP, SIGQUIT}) std::signal(sig, onInterrupt);
 
     std::string path;
     bool infoOnly = false;
@@ -269,13 +287,13 @@ int main(int argc, char** argv) {
         std::vector<std::uint8_t> chunk(64 * 1024);
         const std::uint32_t framesPerChunk =
             static_cast<std::uint32_t>(chunk.size() / client.mBytesPerFrame);
-        while (g_interrupted == 0) {
+        while (!interrupted()) {
             const std::uint32_t got = source.read(chunk.data(), framesPerChunk);
             if (got == 0) break;
 
             std::size_t written = 0;
             const std::size_t bytes = static_cast<std::size_t>(got) * client.mBytesPerFrame;
-            while (written < bytes && g_interrupted == 0) {
+            while (written < bytes && !interrupted()) {
                 written += playback.ring.write(chunk.data() + written, bytes - written);
                 if (written < bytes) std::this_thread::sleep_for(std::chrono::milliseconds(5));
             }
@@ -289,18 +307,14 @@ int main(int argc, char** argv) {
     struct ProducerGuard {
         std::thread& thread;
         ~ProducerGuard() {
-            g_interrupted = 1;
+            g_interrupted.store(1, std::memory_order_relaxed);
             if (thread.joinable()) thread.join();
         }
     } producerGuard{producer};
 
-    // SIGHUP cobre o terminal sendo fechado e SIGQUIT o Ctrl+\; sem eles o processo morreria
-    // sem devolver o device, deixando o sample rate trocado.
-    for (int sig : {SIGINT, SIGTERM, SIGHUP, SIGQUIT}) std::signal(sig, onInterrupt);
-
     // Deixa o buffer encher antes de abrir o fluxo, para o começo da faixa não sair picotado.
     for (int i = 0; i < 200 && playback.ring.availableToRead() < ringBytes / 2 &&
-                    !playback.producerDone.load(std::memory_order_acquire) && g_interrupted == 0;
+                    !playback.producerDone.load(std::memory_order_acquire) && !interrupted();
          ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
@@ -313,14 +327,14 @@ int main(int argc, char** argv) {
     const double seconds = static_cast<double>(source.totalFrames()) / source.format().sampleRate;
     std::printf("tocando  : %.1f s — Ctrl+C interrompe\n", seconds);
 
-    while (g_interrupted == 0 && !playback.finished.load(std::memory_order_acquire)) {
+    while (!interrupted() && !playback.finished.load(std::memory_order_acquire)) {
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
 
-    const bool interruptedByUser = g_interrupted != 0;
+    const bool interruptedByUser = interrupted();
 
     hogged.stop();
-    g_interrupted = 1;  // desbloqueia a thread produtora, que espera espaço no ring
+    g_interrupted.store(1, std::memory_order_relaxed);  // desbloqueia a thread produtora, que espera espaço no ring
     producer.join();    // aqui é o caminho normal; o guard cobre os caminhos de exceção
 
     const std::uint64_t underruns = playback.underruns.load(std::memory_order_relaxed);
@@ -328,6 +342,15 @@ int main(int argc, char** argv) {
         std::printf("aviso    : %llu falhas de alimentação do buffer\n",
                     static_cast<unsigned long long>(underruns));
     }
+    if (std::string error = hogged.finish(); !error.empty()) {
+        std::fprintf(stderr,
+                     "aviso    : %s\n"
+                     "           o device pode ter ficado com outra configuração; tocar\n"
+                     "           qualquer outro som ou abrir Configuração de Áudio e MIDI ajusta\n",
+                     error.c_str());
+        return 1;
+    }
+
     std::printf("fim      : device restaurado\n");
     return interruptedByUser ? 130 : 0;  // 128 + SIGINT, como manda a convenção
 }

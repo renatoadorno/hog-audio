@@ -93,6 +93,12 @@ std::string AudioSource::effectiveClientFormat(AudioStreamBasicDescription& asbd
 }
 
 std::uint32_t AudioSource::read(void* dst, std::uint32_t frames) {
+    if (clientBytesPerFrame_ == 0) return 0;  // setClientFormat ainda não rodou
+    // mDataByteSize é UInt32: um pedido grande demais transbordaria e descreveria um buffer
+    // menor do que o que seria escrito.
+    const std::uint32_t maxFrames = 0xFFFFFFFFu / clientBytesPerFrame_;
+    if (frames > maxFrames) frames = maxFrames;
+
     AudioBufferList list{};
     list.mNumberBuffers = 1;
     list.mBuffers[0].mNumberChannels = 0;  // irrelevante para dados intercalados

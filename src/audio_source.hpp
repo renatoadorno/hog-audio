@@ -18,6 +18,8 @@ public:
     ~AudioSource();
     AudioSource(const AudioSource&) = delete;
     AudioSource& operator=(const AudioSource&) = delete;
+    AudioSource(AudioSource&&) = delete;
+    AudioSource& operator=(AudioSource&&) = delete;
 
     // Devolve mensagem de erro; string vazia em caso de sucesso.
     std::string open(const std::string& path);
