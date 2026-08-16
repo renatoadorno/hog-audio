@@ -25,6 +25,18 @@ add_library(hog_core STATIC
 )
 target_include_directories(hog_core PUBLIC src)
 
+add_executable(hog-audio
+    src/main.cpp
+    src/audio_source.cpp
+    src/hog_device.cpp
+)
+target_link_libraries(hog-audio PRIVATE
+    hog_core
+    "-framework CoreAudio"
+    "-framework AudioToolbox"
+    "-framework CoreFoundation"
+)
+
 enable_testing()
 
 foreach(test_name format_negotiation ring_buffer)
