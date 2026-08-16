@@ -1,0 +1,14 @@
+build/
+compile_commands.json
+.DS_Store
+.cache/
+
+# arquivos de áudio de teste e de uso
+*.flac
+*.wav
+*.aiff
+*.aif
+*.m4a
+*.mp3
+*.caf
+build-asan/
