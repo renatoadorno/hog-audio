@@ -57,6 +57,34 @@ coisa, e é o que este programa evita:
 Para arquivos acima de 24 bits o programa recusa o formato float32, porque aí a conversão
 deixaria de ser exata.
 
+## Proteção contra ruído
+
+Se o formato que o decodificador produz não for exatamente o que o DAC espera, o resultado
+não é uma distorção discreta: é ruído branco em volume total, capaz de danificar fone e
+audição. Três barreiras existem para que nenhuma amostra chegue ao device nessa condição:
+
+1. O tamanho do frame vem do próprio device, nunca de `bitsPerChannel / 8`. Um formato pode
+   carregar amostras de 24 bits em containers de 32, e assumir empacotamento faria o
+   decodificador escrever com um passo e o callback ler com outro.
+2. Depois de configurar a entrega, o formato que o decodificador de fato assumiu é relido e
+   comparado com o que o device espera. Divergiu, o programa para antes de tocar.
+3. No callback, todo byte enviado é dado do arquivo ou zero. Buffer curto, canal excedente ou
+   pedido maior que o previsto resultam em silêncio, nunca em memória não inicializada.
+
+## O que acontece se o processo morrer
+
+O modo exclusivo é associado ao PID pelo `coreaudiod`, que o devolve quando o processo
+termina — verificado inclusive com `kill -9`: o áudio do sistema volta sozinho, sem precisar
+reiniciar serviço nenhum.
+
+| Saída | Modo exclusivo | Sample rate |
+|---|---|---|
+| Fim da faixa, Ctrl+C, `SIGTERM`, `SIGHUP`, `SIGQUIT` | devolvido pelo programa | restaurado |
+| `SIGKILL`, crash | devolvido pelo sistema | permanece no valor em uso |
+
+Ou seja: o Mac não fica mudo em nenhum caso. No caminho abrupto o que sobra é o sample rate
+alterado, corrigível tocando qualquer outra coisa ou pelo Configuração de Áudio e MIDI.
+
 ## Limites conhecidos
 
 - **Detecção de impedância**: o jack que ajusta a tensão para fones de alta impedância existe
@@ -66,8 +94,8 @@ deixaria de ser exata.
 - **Sem resample, por escolha**: um arquivo de 192 kHz num device que vai até 96 kHz é
   recusado, com a lista de rates suportados.
 - **Uma faixa por vez**, sem playlist, seek ou pausa.
-- Se o processo receber `SIGKILL`, o sistema devolve o modo exclusivo sozinho, mas o sample
-  rate permanece no valor que estava em uso.
+- O device é escolhido no início da reprodução. Plugar um fone no meio da faixa não migra o
+  áudio, porque o device já está tomado.
 
 ## Estrutura
 
