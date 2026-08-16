@@ -52,6 +52,30 @@ bool isBetter(const PhysicalFormatDesc& candidate, const PhysicalFormatDesc& cur
 
 }  // namespace
 
+FormatCheck validateInterleavedFormat(unsigned bitsPerChannel, unsigned bytesPerFrame,
+                                      unsigned channels) {
+    if (channels == 0) return {false, "formato sem canais"};
+    if (bitsPerChannel == 0) return {false, "formato sem profundidade de bits"};
+    if (bytesPerFrame == 0) return {false, "formato sem tamanho de frame"};
+    if (bitsPerChannel % 8 != 0) {
+        return {false, "profundidade de " + std::to_string(bitsPerChannel) +
+                           " bits não é múltipla de 8; o layout no buffer seria ambíguo"};
+    }
+    if (bytesPerFrame % channels != 0) {
+        return {false, "frame de " + std::to_string(bytesPerFrame) + " bytes não divide entre " +
+                           std::to_string(channels) + " canais"};
+    }
+
+    // O container por canal pode ser maior que a amostra (int24 dentro de 32 bits), nunca menor.
+    const unsigned bytesPerChannel = bytesPerFrame / channels;
+    if (bytesPerChannel * 8 < bitsPerChannel) {
+        return {false, "container de " + std::to_string(bytesPerChannel) +
+                           " bytes por canal não comporta amostras de " +
+                           std::to_string(bitsPerChannel) + " bits"};
+    }
+    return {true, {}};
+}
+
 Decision negotiate(const FileFormat& file, const DeviceCaps& caps) {
     Decision d;
 

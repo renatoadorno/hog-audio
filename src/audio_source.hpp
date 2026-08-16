@@ -29,6 +29,10 @@ public:
     // Formato em que read() entregará os frames. Precisa ser PCM.
     std::string setClientFormat(const AudioStreamBasicDescription& asbd);
 
+    // O formato que o decodificador de fato assumiu, relido dele. Pode divergir do que foi
+    // pedido, e é esse que descreve os bytes que read() vai produzir.
+    std::string effectiveClientFormat(AudioStreamBasicDescription& asbd) const;
+
     // Lê até `frames`. Devolve quantos frames leu; 0 significa fim do arquivo.
     std::uint32_t read(void* dst, std::uint32_t frames);
 

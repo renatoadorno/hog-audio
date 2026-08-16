@@ -82,6 +82,16 @@ std::string AudioSource::setClientFormat(const AudioStreamBasicDescription& asbd
     return {};
 }
 
+std::string AudioSource::effectiveClientFormat(AudioStreamBasicDescription& asbd) const {
+    UInt32 size = sizeof(asbd);
+    OSStatus status =
+        ExtAudioFileGetProperty(file_, kExtAudioFileProperty_ClientDataFormat, &size, &asbd);
+    if (status != noErr) {
+        return "não consegui confirmar o formato de entrega: " + osStatusText(status);
+    }
+    return {};
+}
+
 std::uint32_t AudioSource::read(void* dst, std::uint32_t frames) {
     AudioBufferList list{};
     list.mNumberBuffers = 1;

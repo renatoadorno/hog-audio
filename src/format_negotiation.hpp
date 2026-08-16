@@ -52,4 +52,15 @@ struct Decision {
 // caminho íntegro, devolve play == false com o motivo preenchido.
 Decision negotiate(const FileFormat& file, const DeviceCaps& caps);
 
+struct FormatCheck {
+    bool ok = false;
+    std::string reason;
+};
+
+// Confere se um formato intercalado é internamente consistente antes de alimentar o device.
+// Um descasamento entre o que o decodificador produz e o que o DAC espera não soa como
+// distorção leve: soa como ruído branco em volume total.
+FormatCheck validateInterleavedFormat(unsigned bitsPerChannel, unsigned bytesPerFrame,
+                                      unsigned channels);
+
 }  // namespace hog

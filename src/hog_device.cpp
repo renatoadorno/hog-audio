@@ -133,6 +133,12 @@ HoggedDevice::~HoggedDevice() {
 
 std::string HoggedDevice::acquire(const OutputDevice& device, double rate,
                                   const AudioStreamBasicDescription& physical) {
+    // Uma segunda aquisição gravaria o estado já modificado por cima do original, e a
+    // restauração passaria a devolver o device ao estado errado.
+    if (savedFormats_ || hogged_) {
+        return "este device já foi tomado por esta instância";
+    }
+
     deviceId_ = device.id;
     streamId_ = device.streamId;
 

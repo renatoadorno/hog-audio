@@ -1,7 +1,8 @@
-#include <csignal>
-#include <cstring>
 #include <chrono>
+#include <cmath>
+#include <csignal>
 #include <cstdio>
+#include <cstring>
 #include <string>
 #include <thread>
 #include <vector>
@@ -29,7 +30,8 @@ struct Playback {
     std::atomic<std::uint64_t> underruns{0};
 
     std::uint32_t bytesPerFrame = 0;   // sempre intercalado, como está no ring buffer
-    std::uint32_t bytesPerSample = 0;
+    std::uint32_t bytesPerSample = 0;  // por canal, incluindo o padding do container
+    std::uint32_t channels = 0;
     bool nonInterleaved = false;
     std::vector<std::uint8_t> scratch;  // pré-alocado: o IOProc não pode alocar
 };
@@ -39,6 +41,15 @@ OSStatus ioProc(AudioObjectID, const AudioTimeStamp*, const AudioBufferList*,
                 const AudioTimeStamp*, AudioBufferList* outputData, const AudioTimeStamp*,
                 void* context) {
     auto* p = static_cast<Playback*>(context);
+    if (outputData == nullptr || outputData->mNumberBuffers == 0) return noErr;
+
+    // Silêncio é o único preenchimento seguro: lixo de memória enviado ao DAC vira ruído
+    // branco em volume total. Toda saída daqui é dado do arquivo ou zero, nunca outra coisa.
+    auto silenceAll = [&] {
+        for (UInt32 i = 0; i < outputData->mNumberBuffers; ++i) {
+            std::memset(outputData->mBuffers[i].mData, 0, outputData->mBuffers[i].mDataByteSize);
+        }
+    };
 
     if (!p->nonInterleaved) {
         AudioBuffer& buffer = outputData->mBuffers[0];
@@ -55,12 +66,24 @@ OSStatus ioProc(AudioObjectID, const AudioTimeStamp*, const AudioBufferList*,
 
     const std::uint32_t frames = outputData->mBuffers[0].mDataByteSize / p->bytesPerSample;
     const std::size_t need = static_cast<std::size_t>(frames) * p->bytesPerFrame;
+    if (need > p->scratch.size()) {  // o device pediu mais do que reservamos: cala, não arrisca
+        silenceAll();
+        p->underruns.fetch_add(1, std::memory_order_relaxed);
+        return noErr;
+    }
+
     const std::size_t got = p->ring.read(p->scratch.data(), need);
     if (got < need) std::memset(p->scratch.data() + got, 0, need - got);
 
-    // Desintercala: o ring guarda LRLRLR..., o device quer um buffer por canal.
+    // Desintercala: o ring guarda LRLRLR..., o device quer um buffer por canal. Buffers além
+    // dos canais que temos recebem silêncio.
+    const UInt32 channels = p->channels;
     for (UInt32 ch = 0; ch < outputData->mNumberBuffers; ++ch) {
         auto* dst = static_cast<std::uint8_t*>(outputData->mBuffers[ch].mData);
+        if (ch >= channels) {
+            std::memset(dst, 0, outputData->mBuffers[ch].mDataByteSize);
+            continue;
+        }
         const std::uint8_t* src = p->scratch.data() + ch * p->bytesPerSample;
         for (std::uint32_t f = 0; f < frames; ++f) {
             std::memcpy(dst + f * p->bytesPerSample, src + f * p->bytesPerFrame,
@@ -182,16 +205,54 @@ int main(int argc, char** argv) {
     std::printf("callback : %s%s\n", describeFormat(stream).c_str(),
                 hogged.virtualFormatLocked() ? " [travado igual ao físico]" : "");
 
+    if (stream.mFormatID != kAudioFormatLinearPCM) {
+        std::fprintf(stderr, "erro: o device não está em PCM linear; não vou alimentá-lo\n");
+        return 1;
+    }
+
     // O decodificador entrega sempre intercalado, que é como o ring buffer guarda; o IOProc
     // desintercala se o device pedir assim.
+    //
+    // O tamanho do frame vem do próprio device, nunca de bitsPerChannel/8: um formato pode
+    // carregar amostras de 24 bits em containers de 32, e recalcular assumindo empacotamento
+    // faria o decodificador produzir um passo e o IOProc ler outro — ruído branco, não música.
+    const bool nonInterleaved = (stream.mFormatFlags & kAudioFormatFlagIsNonInterleaved) != 0;
     AudioStreamBasicDescription client = stream;
     client.mFormatFlags &= ~static_cast<UInt32>(kAudioFormatFlagIsNonInterleaved);
     client.mFramesPerPacket = 1;
-    client.mBytesPerFrame = client.mChannelsPerFrame * (client.mBitsPerChannel / 8);
+    client.mBytesPerFrame =
+        nonInterleaved ? stream.mBytesPerFrame * stream.mChannelsPerFrame : stream.mBytesPerFrame;
     client.mBytesPerPacket = client.mBytesPerFrame;
+
+    if (hog::FormatCheck check = hog::validateInterleavedFormat(
+            client.mBitsPerChannel, client.mBytesPerFrame, client.mChannelsPerFrame);
+        !check.ok) {
+        std::fprintf(stderr, "erro: formato de entrega inconsistente: %s\n", check.reason.c_str());
+        return 1;
+    }
 
     if (std::string error = source.setClientFormat(client); !error.empty()) {
         std::fprintf(stderr, "erro: %s\n", error.c_str());
+        return 1;
+    }
+
+    // O decodificador pode ajustar o que aceitou. Se o que ele vai entregar divergir do que
+    // o device espera, parar aqui é a diferença entre silêncio e ruído em volume total.
+    AudioStreamBasicDescription effective{};
+    if (std::string error = source.effectiveClientFormat(effective); !error.empty()) {
+        std::fprintf(stderr, "erro: %s\n", error.c_str());
+        return 1;
+    }
+    if (effective.mBitsPerChannel != client.mBitsPerChannel ||
+        effective.mBytesPerFrame != client.mBytesPerFrame ||
+        effective.mChannelsPerFrame != client.mChannelsPerFrame ||
+        (effective.mFormatFlags & kAudioFormatFlagIsFloat) !=
+            (client.mFormatFlags & kAudioFormatFlagIsFloat) ||
+        std::fabs(effective.mSampleRate - client.mSampleRate) > 0.5) {
+        std::fprintf(stderr,
+                     "erro: o decodificador vai entregar %s, mas o device espera %s; "
+                     "reproduzir assim geraria ruído\n",
+                     describeFormat(effective).c_str(), describeFormat(client).c_str());
         return 1;
     }
 
@@ -199,8 +260,9 @@ int main(int argc, char** argv) {
         static_cast<std::size_t>(client.mSampleRate) * client.mBytesPerFrame * 2;
     Playback playback(ringBytes);
     playback.bytesPerFrame = client.mBytesPerFrame;
-    playback.bytesPerSample = client.mBitsPerChannel / 8;
-    playback.nonInterleaved = (stream.mFormatFlags & kAudioFormatFlagIsNonInterleaved) != 0;
+    playback.bytesPerSample = client.mBytesPerFrame / client.mChannelsPerFrame;
+    playback.channels = client.mChannelsPerFrame;
+    playback.nonInterleaved = nonInterleaved;
     playback.scratch.resize(ringBytes);
 
     std::thread producer([&] {
@@ -221,14 +283,31 @@ int main(int argc, char** argv) {
         playback.producerDone.store(true, std::memory_order_release);
     });
 
-    std::signal(SIGINT, onInterrupt);
-    std::signal(SIGTERM, onInterrupt);
+    // Uma std::thread ainda unível no destrutor chama std::terminate, e aí nada restaura o
+    // device. Este guard encerra e une a produtora em qualquer saída, inclusive por exceção,
+    // garantindo que o destrutor de HoggedDevice chegue a rodar.
+    struct ProducerGuard {
+        std::thread& thread;
+        ~ProducerGuard() {
+            g_interrupted = 1;
+            if (thread.joinable()) thread.join();
+        }
+    } producerGuard{producer};
+
+    // SIGHUP cobre o terminal sendo fechado e SIGQUIT o Ctrl+\; sem eles o processo morreria
+    // sem devolver o device, deixando o sample rate trocado.
+    for (int sig : {SIGINT, SIGTERM, SIGHUP, SIGQUIT}) std::signal(sig, onInterrupt);
+
+    // Deixa o buffer encher antes de abrir o fluxo, para o começo da faixa não sair picotado.
+    for (int i = 0; i < 200 && playback.ring.availableToRead() < ringBytes / 2 &&
+                    !playback.producerDone.load(std::memory_order_acquire) && g_interrupted == 0;
+         ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
 
     if (std::string error = hogged.start(ioProc, &playback); !error.empty()) {
         std::fprintf(stderr, "erro: %s\n", error.c_str());
-        g_interrupted = 1;
-        producer.join();
-        return 1;
+        return 1;  // producerGuard encerra a thread; o destrutor de hogged devolve o device
     }
 
     const double seconds = static_cast<double>(source.totalFrames()) / source.format().sampleRate;
@@ -242,7 +321,7 @@ int main(int argc, char** argv) {
 
     hogged.stop();
     g_interrupted = 1;  // desbloqueia a thread produtora, que espera espaço no ring
-    producer.join();
+    producer.join();    // aqui é o caminho normal; o guard cobre os caminhos de exceção
 
     const std::uint64_t underruns = playback.underruns.load(std::memory_order_relaxed);
     if (underruns > 0) {

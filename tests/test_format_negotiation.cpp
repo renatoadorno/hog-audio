@@ -136,9 +136,49 @@ void device_sem_formato_algum_aborta() {
     CHECK(!d.play);
 }
 
+// --- validação do formato de entrega -------------------------------------------------
+// Um descasamento entre o que o decodificador produz e o que o device espera não degrada
+// o som: vira ruído branco em volume total, capaz de danificar fone e audição. Por isso a
+// consistência é verificada antes de qualquer amostra chegar ao DAC.
+
+void formatos_consistentes_sao_aceitos() {
+    CHECK(validateInterleavedFormat(32, 8, 2).ok);   // float32 estéreo
+    CHECK(validateInterleavedFormat(16, 4, 2).ok);   // int16 estéreo
+    CHECK(validateInterleavedFormat(24, 6, 2).ok);   // int24 packed
+    CHECK(validateInterleavedFormat(24, 8, 2).ok);   // int24 em container de 32 bits
+    CHECK(validateInterleavedFormat(32, 4, 1).ok);   // float32 mono
+}
+
+void container_menor_que_a_amostra_e_recusado() {
+    // 32 bits por canal não cabem em 2 bytes por canal.
+    auto r = validateInterleavedFormat(32, 4, 2);
+
+    CHECK(!r.ok);
+    CHECK(!r.reason.empty());
+}
+
+void bytes_por_frame_indivisivel_pelos_canais_e_recusado() {
+    CHECK(!validateInterleavedFormat(16, 5, 2).ok);
+}
+
+void profundidade_fora_do_byte_e_recusada() {
+    CHECK(!validateInterleavedFormat(20, 8, 2).ok);
+}
+
+void formato_degenerado_e_recusado() {
+    CHECK(!validateInterleavedFormat(16, 4, 0).ok);
+    CHECK(!validateInterleavedFormat(0, 4, 2).ok);
+    CHECK(!validateInterleavedFormat(16, 0, 2).ok);
+}
+
 }  // namespace
 
 int main() {
+    formatos_consistentes_sao_aceitos();
+    container_menor_que_a_amostra_e_recusado();
+    bytes_por_frame_indivisivel_pelos_canais_e_recusado();
+    profundidade_fora_do_byte_e_recusada();
+    formato_degenerado_e_recusado();
     rate_exatamente_suportado_e_aceito();
     rate_dentro_de_range_continuo_e_aceito();
     rate_nao_suportado_aborta();
