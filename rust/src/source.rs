@@ -15,6 +15,11 @@ pub struct AudioSource {
     client_bytes_per_frame: u32,
 }
 
+// O ExtAudioFileRef é um ponteiro opaco, que o Rust trata como não-enviável por precaução.
+// Movê-lo para a thread produtora é seguro porque só ela o usa, e sequencialmente: o
+// AudioSource nunca é compartilhado entre threads, apenas transferido para uma.
+unsafe impl Send for AudioSource {}
+
 // Formatos comprimidos (FLAC, ALAC) deixam mBitsPerChannel zerado e codificam a profundidade
 // da fonte nos format flags, com a mesma convenção do Apple Lossless.
 fn bit_depth_from_source_flags(flags: u32) -> u32 {
