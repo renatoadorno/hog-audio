@@ -242,6 +242,7 @@ int main(int argc, char** argv) {
     for (int sig : {SIGINT, SIGTERM, SIGHUP, SIGQUIT}) std::signal(sig, onInterrupt);
 
     std::string path;
+    std::string dumpPath;
     bool infoOnly = false;
     bool hasVolumeRequest = false;
     hog::VolumeRequest volumeRequest;
@@ -253,6 +254,12 @@ int main(int argc, char** argv) {
             infoOnly = true;
         } else if (arg == "-h" || arg == "--help") {
             return usage();
+        } else if (arg == "--dump") {
+            if (i + 1 >= argc) {
+                std::fprintf(stderr, "erro: --dump exige um caminho de arquivo\n");
+                return 2;
+            }
+            dumpPath = argv[++i];
         } else if (arg == "--volume" || arg == "--max-volume") {
             if (i + 1 >= argc) {
                 std::fprintf(stderr, "erro: %s exige um valor\n", arg.c_str());
@@ -416,6 +423,45 @@ int main(int argc, char** argv) {
             if (thread.joinable()) thread.join();
         }
     } producerGuard{producer};
+
+    // Consome o ring exatamente como o IOProc faria, mas grava em disco. O pipeline é o
+    // mesmo — decodificador, ring buffer, alinhamento de frame — porque um atalho que apenas
+    // decodificasse pularia justamente as partes onde estiveram os bugs mais caros.
+    if (!dumpPath.empty()) {
+        constexpr std::size_t kDumpBlockFrames = 512;
+        std::vector<std::uint8_t> block(kDumpBlockFrames * client.mBytesPerFrame);
+        std::FILE* out = std::fopen(dumpPath.c_str(), "wb");
+        if (out == nullptr) {
+            std::fprintf(stderr, "erro: não consegui criar %s\n", dumpPath.c_str());
+            return 1;
+        }
+
+        std::uint64_t framesWritten = 0;
+        while (true) {
+            const std::size_t take = hog::alignedReadSize(
+                block.size(), playback.ring.availableToRead(), playback.bytesPerFrame);
+            const std::size_t got = playback.ring.read(block.data(), take);
+            if (got > 0) {
+                std::fwrite(block.data(), 1, got, out);
+                framesWritten += got / client.mBytesPerFrame;
+                continue;
+            }
+            if (playback.producerDone.load(std::memory_order_acquire) || interrupted()) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        std::fclose(out);
+        std::printf("dump     : %llu frames em %s\n",
+                    static_cast<unsigned long long>(framesWritten), dumpPath.c_str());
+
+        g_interrupted.store(1, std::memory_order_relaxed);
+        producer.join();
+        if (std::string error = hogged.finish(); !error.empty()) {
+            std::fprintf(stderr, "aviso    : %s\n", error.c_str());
+            return 1;
+        }
+        std::printf("fim      : device restaurado\n");
+        return 0;
+    }
 
     // Deixa o buffer encher antes de abrir o fluxo, para o começo da faixa não sair picotado.
     for (int i = 0; i < 200 && playback.ring.availableToRead() < ringBytes / 2 &&

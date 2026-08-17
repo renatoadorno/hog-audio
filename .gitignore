@@ -1,4 +1,8 @@
+cpp/build/
+cpp/build-asan/
+rust/target/
 build/
+build-asan/
 compile_commands.json
 .DS_Store
 .cache/
@@ -11,4 +15,3 @@ compile_commands.json
 *.m4a
 *.mp3
 *.caf
-build-asan/
