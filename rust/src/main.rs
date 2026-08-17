@@ -1,3 +1,4 @@
+mod device;
 mod ffi;
 mod format;
 mod ring;
