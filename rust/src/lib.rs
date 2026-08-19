@@ -5,6 +5,7 @@
 pub mod device;
 pub mod ffi;
 pub mod format;
+pub mod playback;
 pub mod ring;
 pub mod source;
 pub mod status;

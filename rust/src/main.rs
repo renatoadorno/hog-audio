@@ -1,14 +1,15 @@
-use std::cell::UnsafeCell;
 use std::io::Write;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Arc;
 
 use coreaudio_sys::*;
 
 use hog_audio::device::{query_default_output_device, HoggedDevice, OutputDevice};
 use hog_audio::format::{self, validate_interleaved_format, FileFormat};
-use hog_audio::ring::{aligned_read_size, RingBuffer};
+use hog_audio::playback::{io_proc, Playback};
+use hog_audio::ring::aligned_read_size;
 use hog_audio::source::AudioSource;
+use hog_audio::status::SharedStatus;
 use hog_audio::volume::{apply_ceiling, parse_volume, VolumeRequest, VolumeUnit};
 
 const DEFAULT_CEILING: f64 = 0.5;
@@ -33,107 +34,6 @@ extern "C" fn on_interrupt(_sig: i32) {
 
 fn interrupted() -> bool {
     INTERRUPTED.load(Ordering::Relaxed) != 0
-}
-
-/// Estado compartilhado entre a thread que decodifica e o IOProc de tempo real.
-struct Playback {
-    ring: RingBuffer,
-    producer_done: AtomicBool,
-    finished: AtomicBool,
-    underruns: AtomicU64,
-    bytes_per_frame: u32,
-    bytes_per_sample: u32, // por canal, incluindo o padding do container
-    channels: u32,
-    non_interleaved: bool,
-    scratch: UnsafeCell<Vec<u8>>, // pré-alocado: o IOProc não pode alocar
-}
-
-// `scratch` só é tocado pelo consumidor, que é uma thread só — o IOProc na reprodução, ou o
-// laço de dump. O contrato é o mesmo do RingBuffer: um produtor, um consumidor.
-unsafe impl Sync for Playback {}
-unsafe impl Send for Playback {}
-
-/// Roda em thread de tempo real: só cópia e atômicos. Nada de alocar, travar ou imprimir.
-unsafe extern "C" fn io_proc(
-    _device: AudioObjectID,
-    _now: *const AudioTimeStamp,
-    _input_data: *const AudioBufferList,
-    _input_time: *const AudioTimeStamp,
-    output_data: *mut AudioBufferList,
-    _output_time: *const AudioTimeStamp,
-    context: *mut std::ffi::c_void,
-) -> OSStatus {
-    let p = &*(context as *const Playback);
-    if output_data.is_null() || (*output_data).mNumberBuffers == 0 {
-        return 0;
-    }
-
-    let buffer_count = (*output_data).mNumberBuffers as usize;
-    let buffers = (*output_data).mBuffers.as_mut_ptr();
-
-    if !p.non_interleaved {
-        let b = &mut *buffers;
-        let need = b.mDataByteSize as usize;
-        let dst = std::slice::from_raw_parts_mut(b.mData as *mut u8, need);
-        let take = aligned_read_size(need, p.ring.available_to_read(), p.bytes_per_frame);
-        let got = p.ring.read(&mut dst[..take]);
-        if got < need {
-            // Silêncio é o único preenchimento seguro: lixo de memória enviado ao DAC vira
-            // ruído branco em volume total.
-            std::ptr::write_bytes(dst.as_mut_ptr().add(got), 0, need - got);
-            if p.producer_done.load(Ordering::Acquire) {
-                p.finished.store(true, Ordering::Release);
-            } else {
-                p.underruns.fetch_add(1, Ordering::Relaxed);
-            }
-        }
-        return 0;
-    }
-
-    let frames = ((*buffers).mDataByteSize / p.bytes_per_sample) as usize;
-    let need = frames * p.bytes_per_frame as usize;
-    let scratch = &mut *p.scratch.get();
-    if need > scratch.len() {
-        // O device pediu mais do que reservamos: cala, não arrisca.
-        for i in 0..buffer_count {
-            let b = &mut *buffers.add(i);
-            std::ptr::write_bytes(b.mData as *mut u8, 0, b.mDataByteSize as usize);
-        }
-        p.underruns.fetch_add(1, Ordering::Relaxed);
-        return 0;
-    }
-
-    let take = aligned_read_size(need, p.ring.available_to_read(), p.bytes_per_frame);
-    let got = p.ring.read(&mut scratch[..take]);
-    if got < need {
-        std::ptr::write_bytes(scratch.as_mut_ptr().add(got), 0, need - got);
-    }
-
-    // Desintercala: o ring guarda LRLRLR..., o device quer um buffer por canal. Buffers além
-    // dos canais que temos recebem silêncio.
-    let sample = p.bytes_per_sample as usize;
-    let frame = p.bytes_per_frame as usize;
-    for ch in 0..buffer_count {
-        let b = &mut *buffers.add(ch);
-        let dst = b.mData as *mut u8;
-        if ch as u32 >= p.channels {
-            std::ptr::write_bytes(dst, 0, b.mDataByteSize as usize);
-            continue;
-        }
-        let src = scratch.as_ptr().add(ch * sample);
-        for f in 0..frames {
-            std::ptr::copy_nonoverlapping(src.add(f * frame), dst.add(f * sample), sample);
-        }
-    }
-
-    if got < need {
-        if p.producer_done.load(Ordering::Acquire) {
-            p.finished.store(true, Ordering::Release);
-        } else {
-            p.underruns.fetch_add(1, Ordering::Relaxed);
-        }
-    }
-    0
 }
 
 fn describe_format(f: &AudioStreamBasicDescription) -> String {
@@ -492,17 +392,14 @@ fn run() -> i32 {
     }
 
     let ring_bytes = client.mSampleRate as usize * client.mBytesPerFrame as usize * 2;
-    let playback = Arc::new(Playback {
-        ring: RingBuffer::new(ring_bytes),
-        producer_done: AtomicBool::new(false),
-        finished: AtomicBool::new(false),
-        underruns: AtomicU64::new(0),
-        bytes_per_frame: client.mBytesPerFrame,
-        bytes_per_sample: client.mBytesPerFrame / client.mChannelsPerFrame,
-        channels: client.mChannelsPerFrame,
+    let status = Arc::new(SharedStatus::new());
+    status.set_track(source.total_frames(), client.mSampleRate);
+    let playback = Arc::new(Playback::new(
+        ring_bytes,
+        &client,
         non_interleaved,
-        scratch: UnsafeCell::new(vec![0u8; ring_bytes]),
-    });
+        Arc::clone(&status),
+    ));
 
     let producer = {
         let playback = Arc::clone(&playback);
@@ -536,7 +433,7 @@ fn run() -> i32 {
     INTERRUPTED.store(1, Ordering::Relaxed); // desbloqueia a produtora
     let _ = producer.join();
 
-    let underruns = playback.underruns.load(Ordering::Relaxed);
+    let underruns = status.underruns();
     if underruns > 0 {
         println!("aviso    : {underruns} falhas de alimentação do buffer");
     }
