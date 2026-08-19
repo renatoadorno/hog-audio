@@ -7,5 +7,6 @@ pub mod ffi;
 pub mod format;
 pub mod ring;
 pub mod source;
+pub mod status;
 pub mod transitions;
 pub mod volume;
