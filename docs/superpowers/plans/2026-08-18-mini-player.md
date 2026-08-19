@@ -2901,7 +2901,7 @@ final class FakePlayer: HogPlayerProtocol, @unchecked Sendable {
         Snapshot(state: estado, elapsedSeconds: 0, totalSeconds: 10,
                  underruns: 0, volumeScalar: 0.5)
     }
-    func shutdown() { chamadas.append("shutdown") }
+    func shutdown() throws { chamadas.append("shutdown") }
 }
 
 @Test @MainActor func oBotaoTocaQuandoParadoEPausaQuandoTocando() {
@@ -3053,7 +3053,9 @@ public final class PlayerViewModel: ObservableObject {
 
     public func shutdown() {
         stopPolling()
-        player.shutdown()
+        // Falha de restauracao do device e informacao, nao ruido: sem isto o Mac pode ficar
+        // com outro sample rate sem ninguem saber.
+        do { try player.shutdown() } catch { errorMessage = "\(error)" }
     }
 }
 ```
