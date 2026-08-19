@@ -20,7 +20,7 @@ let package = Package(
         .target(name: "HogPlayerKit", dependencies: ["HogAudioBindings"]),
         .executableTarget(
             name: "HogPlayer",
-            dependencies: ["HogAudioBindings"],
+            dependencies: ["HogPlayerKit"],
             linkerSettings: linkRust
         ),
         .testTarget(
