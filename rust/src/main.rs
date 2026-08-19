@@ -1,7 +1,9 @@
 use std::io::Write;
 use std::sync::atomic::{AtomicI32, Ordering};
 
-use hog_audio::engine::{Engine, LoadedTrack, VolumeOutcome, DEFAULT_CEILING};
+use coreaudio_sys::{AudioStreamBasicDescription, kAudioFormatFlagIsFloat, kAudioFormatFlagIsNonInterleaved};
+
+use hog_audio::engine::{DeviceReport, Engine, LoadedTrack, VolumeOutcome, DEFAULT_CEILING};
 use hog_audio::ring::aligned_read_size;
 use hog_audio::transitions::PlayerState;
 use hog_audio::volume::{parse_volume, VolumeRequest, VolumeUnit};
@@ -38,6 +40,58 @@ fn print_track_report(path: &str, track: &LoadedTrack) {
     println!("device   : {}", track.device_name);
 }
 
+fn describe_format(f: &AudioStreamBasicDescription) -> String {
+    let kind = if f.mFormatFlags & kAudioFormatFlagIsFloat != 0 {
+        "float"
+    } else {
+        "inteiro"
+    };
+    let layout = if f.mFormatFlags & kAudioFormatFlagIsNonInterleaved != 0 {
+        ", não intercalado"
+    } else {
+        ""
+    };
+    format!(
+        "{} Hz / {} bits {} / {} canais{}",
+        f.mSampleRate as i64, f.mBitsPerChannel, kind, f.mChannelsPerFrame, layout
+    )
+}
+
+/// A ferramenta de diagnóstico do projeto: mostra o que o device oferece e o que foi
+/// negociado, mesmo fora de `--info` — é como se responde "por que este arquivo não toca" e
+/// "ele escolheu o formato físico certo". Fica fora de `print_track_report` de propósito:
+/// não é parte do que a interface gráfica vai consumir, só da CLI.
+fn print_device_report(report: &DeviceReport) {
+    println!("rate atual: {} Hz", report.nominal_rate as i64);
+
+    let rates: Vec<String> = report
+        .supported_rates
+        .iter()
+        .map(|r| {
+            if (r.maximum - r.minimum).abs() < 0.5 {
+                format!("{}", r.minimum as i64)
+            } else {
+                format!("{}-{}", r.minimum as i64, r.maximum as i64)
+            }
+        })
+        .collect();
+    println!("rates    : {}", rates.join(", "));
+    println!(
+        "formatos : {} físicos disponíveis",
+        report.physical_formats.len()
+    );
+    for f in &report.physical_formats {
+        println!("           {}", describe_format(f));
+    }
+    if report.volume >= 0.0 {
+        println!("volume   : {:.0}%", report.volume * 100.0);
+    }
+    println!("negociado: {}", report.negotiated);
+    if report.duplicate_mono_to_stereo {
+        println!("aviso    : arquivo mono, será duplicado nos dois canais");
+    }
+}
+
 /// Formata o volume aplicado a partir do que foi de fato lido do hardware. `decibels` como
 /// NaN é o sinal de que a leitura falhou — mesma situação que o antigo "desconhecido".
 fn describe_volume_outcome(outcome: &VolumeOutcome) -> String {
@@ -49,8 +103,14 @@ fn describe_volume_outcome(outcome: &VolumeOutcome) -> String {
 }
 
 /// Espelha as linhas que a CLI sempre imprimiu para o volume: pedido explícito, teto que não
-/// precisou agir, teto que baixou o volume, ou device sem controle algum.
+/// precisou agir, teto que baixou o volume, teto que falhou ao baixar (não-fatal, mas o
+/// motivo não pode se perder), ou device sem controle algum.
 fn print_volume_outcome(outcome: &VolumeOutcome, explicit_request: bool, ceiling: f64) {
+    if let Some(warning) = &outcome.warning {
+        println!("aviso    : {warning}");
+        return;
+    }
+
     if !explicit_request && outcome.previous_scalar < 0.0 {
         println!("volume   : device sem controle de volume; teto não aplicável");
         return;
@@ -178,12 +238,15 @@ fn run() -> i32 {
     };
 
     print_track_report(&options.path, &track);
+    if let Some(report) = engine.device_report() {
+        print_device_report(&report);
+    }
     if options.info_only {
         return 0;
     }
 
     if let Some(path) = options.dump.as_ref() {
-        return run_dump(&engine, path);
+        return run_dump(&engine, path, options.volume.is_some(), options.ceiling);
     }
 
     if let Err(error) = engine.play() {
@@ -226,7 +289,7 @@ fn run() -> i32 {
 /// Consome o ring exatamente como o IOProc faria, mas grava em disco. O pipeline é o mesmo —
 /// decodificador, ring buffer, alinhamento de frame — porque um atalho que apenas
 /// decodificasse pularia justamente as partes onde estiveram os bugs mais caros.
-fn run_dump(engine: &Engine, path: &str) -> i32 {
+fn run_dump(engine: &Engine, path: &str, explicit_request: bool, ceiling: f64) -> i32 {
     let (playback, client) = match engine.start_offline() {
         Ok(pair) => pair,
         Err(error) => {
@@ -234,6 +297,11 @@ fn run_dump(engine: &Engine, path: &str) -> i32 {
             return 1;
         }
     };
+    // O dump adquire o device e aplica o volume de verdade, igual à reprodução: omitir esta
+    // linha esconderia algo que de fato aconteceu no hardware.
+    if let Some(outcome) = engine.volume_outcome() {
+        print_volume_outcome(&outcome, explicit_request, ceiling);
+    }
 
     let mut file = match std::fs::File::create(path) {
         Ok(file) => file,

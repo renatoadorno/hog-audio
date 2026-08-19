@@ -9,7 +9,7 @@ use std::thread::JoinHandle;
 use coreaudio_sys::AudioStreamBasicDescription;
 
 use crate::device::{query_default_output_device, HoggedDevice, OutputDevice};
-use crate::format::{self, Decision};
+use crate::format::{self, Decision, SampleRateRange};
 use crate::playback::Playback;
 use crate::source::AudioSource;
 use crate::status::SharedStatus;
@@ -31,12 +31,28 @@ pub struct LoadedTrack {
 }
 
 /// O que a aplicação de volume de fato fez, para quem quiser relatar.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct VolumeOutcome {
     pub scalar: f32,
     pub decibels: f64,
     pub previous_scalar: f32, // negativo quando o device não expõe volume
     pub lowered_by_ceiling: bool,
+    // O teto é rede de proteção, não garantia: quando baixar por ele falha, a reprodução
+    // segue (ao contrário de um pedido explícito falhar), mas o motivo não pode se perder —
+    // sem este campo ele virava indistinguível de "já estava abaixo do teto".
+    pub warning: Option<String>,
+}
+
+/// Diagnóstico de linha de comando sobre o device consultado e o que foi negociado com ele.
+/// Não é o tipo de fronteira da interface gráfica — `LoadedTrack` é esse; isto é ferramenta
+/// de `--info` e de relatório antes de tocar, e não deveria enxugar `LoadedTrack` para caber.
+pub struct DeviceReport {
+    pub nominal_rate: f64,
+    pub supported_rates: Vec<SampleRateRange>,
+    pub physical_formats: Vec<AudioStreamBasicDescription>,
+    pub volume: f32, // negativo quando o device não expõe volume
+    pub negotiated: String,
+    pub duplicate_mono_to_stereo: bool,
 }
 
 pub struct Engine {
@@ -117,7 +133,24 @@ impl Engine {
 
     /// O que a aplicação de volume fez na última aquisição do device, para a CLI relatar.
     pub fn volume_outcome(&self) -> Option<VolumeOutcome> {
-        self.lock().volume_outcome
+        self.lock().volume_outcome.clone()
+    }
+
+    /// Diagnóstico para `--info` e para o relatório impresso antes de tocar: o que o device
+    /// oferece e o que foi negociado com a faixa carregada. `None` antes de qualquer `load`
+    /// bem-sucedido — não há device consultado nem negociação para descrever.
+    pub fn device_report(&self) -> Option<DeviceReport> {
+        let inner = self.lock();
+        let device = inner.device.as_ref()?;
+        let decision = inner.decision.as_ref()?;
+        Some(DeviceReport {
+            nominal_rate: device.nominal_rate,
+            supported_rates: device.caps.rates.clone(),
+            physical_formats: device.physical_formats.clone(),
+            volume: device.volume,
+            negotiated: decision.reason.clone(),
+            duplicate_mono_to_stereo: decision.duplicate_mono_to_stereo,
+        })
     }
 
     pub fn load(&self, path: &str) -> Result<LoadedTrack, String> {
@@ -513,6 +546,7 @@ pub(crate) fn apply_volume(
             decibels: applied_decibels,
             previous_scalar: before,
             lowered_by_ceiling: false,
+            warning: None,
         });
     }
 
@@ -522,6 +556,7 @@ pub(crate) fn apply_volume(
             decibels: f64::NAN,
             previous_scalar: device.volume,
             lowered_by_ceiling: false,
+            warning: None,
         });
     }
 
@@ -542,18 +577,24 @@ pub(crate) fn apply_volume(
             decibels: applied_decibels,
             previous_scalar: current,
             lowered_by_ceiling: false,
+            warning: None,
         });
     }
 
-    if hogged.set_volume(decision.scalar as f32).is_err() {
+    if let Err(error) = hogged.set_volume(decision.scalar as f32) {
         // O teto é rede de proteção, não garantia: não conseguir baixar não pode abortar a
-        // reprodução, ao contrário de um pedido explícito falhar.
+        // reprodução, ao contrário de um pedido explícito falhar. O texto do erro vai no
+        // aviso para não ficar indistinguível de "já estava abaixo do teto".
         let (applied_scalar, applied_decibels) = read_applied(hogged, current);
         return Ok(VolumeOutcome {
             scalar: applied_scalar,
             decibels: applied_decibels,
             previous_scalar: current,
             lowered_by_ceiling: false,
+            warning: Some(format!(
+                "volume em {:.0}% e não consegui baixá-lo ({error})",
+                current * 100.0
+            )),
         });
     }
 
@@ -563,6 +604,7 @@ pub(crate) fn apply_volume(
         decibels: applied_decibels,
         previous_scalar: current,
         lowered_by_ceiling: true,
+        warning: None,
     })
 }
 
