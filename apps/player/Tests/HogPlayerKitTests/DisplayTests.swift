@@ -97,4 +97,8 @@ private func snap(_ state: PlayerState, elapsed: Double = 0, underruns: UInt64 =
     let d = displayState(snapshot: snap(.finished, elapsed: 208.7), metadata: tags, format: faixa)
     #expect(d.canPlay)
     #expect(!d.canPause)
+    // `poll_finished` do lado Rust só chama `AudioDeviceStop`: o device continua retido, e a
+    // linha técnica não pode apagar o "hog ativo" justo no instante em que a surpresa de o
+    // Mac continuar mudo é maior.
+    #expect(d.technicalLine.contains("hog ativo"))
 }

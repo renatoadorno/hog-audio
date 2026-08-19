@@ -38,9 +38,10 @@ public func displayState(
     format: TrackFormat?
 ) -> DisplayState {
     let tocando = snapshot.state == .playing
-    // Só estes dois estados seguram o device: em Loaded a negociação já rodou, mas o hog só
-    // é tomado no play.
-    let comDevice = snapshot.state == .playing || snapshot.state == .paused
+    // Em Loaded a negociação já rodou, mas o hog só é tomado no play. Em Finished o
+    // `poll_finished` do lado Rust só chama `AudioDeviceStop` — o device continua retido, e
+    // é exatamente o estado em que a surpresa de "por que o Mac segue mudo" é maior.
+    let comDevice = [.playing, .paused, .finished].contains(snapshot.state)
 
     var tecnica = ""
     if let format {
