@@ -61,10 +61,14 @@ impl SharedStatus {
     }
 
     pub fn set_track(&self, total_frames: i64, sample_rate: f64) {
-        self.total_frames.store(total_frames, Ordering::Release);
+        // A interface lê estes campos concorrentemente, sem lock e sem esperar este método
+        // terminar. Zerar o progresso antes de publicar total/taxa é o que garante isso: na
+        // ordem inversa, uma leitura intercalada veria o total da faixa nova com o decorrido
+        // da faixa anterior e mostraria a faixa nova já no fim.
+        self.reset_progress();
         self.sample_rate_bits
             .store(sample_rate.to_bits(), Ordering::Release);
-        self.reset_progress();
+        self.total_frames.store(total_frames, Ordering::Release);
     }
 
     pub fn reset_progress(&self) {
@@ -78,12 +82,15 @@ impl SharedStatus {
     }
 
     pub fn elapsed_seconds(&self) -> f64 {
+        // A taxa é lida uma única vez porque um set_track() pode correr entre dois loads
+        // independentes; ler via total_seconds() aqui misturaria o decorrido de uma taxa
+        // com o total de outra.
         let rate = f64::from_bits(self.sample_rate_bits.load(Ordering::Acquire));
         if rate <= 0.0 {
             return 0.0;
         }
         let elapsed = self.frames_rendered.load(Ordering::Relaxed) as f64 / rate;
-        let total = self.total_seconds();
+        let total = self.total_frames.load(Ordering::Acquire) as f64 / rate;
         if total > 0.0 && elapsed > total {
             total
         } else {
