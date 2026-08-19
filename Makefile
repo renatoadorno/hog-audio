@@ -6,7 +6,7 @@ FFI_DIR   := apps/player/Sources/HogAudioFFI
 BIND_DIR  := apps/player/Sources/HogAudioBindings
 APP_DIR   := apps/player/HogAudio.app
 
-.PHONY: all cpp cpp-test cpp-asan rust rust-test rust-lib bindings swift-test test verify verify-pause verify-volume info play app run-app clean
+.PHONY: all cpp cpp-test cpp-asan rust rust-test hw-test rust-lib bindings swift-test test verify verify-pause verify-volume info play app run-app clean
 
 all: cpp rust
 
@@ -29,6 +29,11 @@ rust:
 
 rust-test:
 	@cd rust && cargo test
+
+# Os testes de hardware tomam o device de saida de verdade. Em paralelo eles disputam o mesmo
+# device e reprovam sem que haja defeito, entao rodam em serie.
+hw-test:
+	@cd rust && cargo test -- --ignored --test-threads=1
 
 rust-lib:
 	@cd rust && cargo build --release
