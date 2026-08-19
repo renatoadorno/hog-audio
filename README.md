@@ -156,9 +156,13 @@ e mostrar título, artista, álbum e capa quando embutida.
 
 **Comportamentos que são decisão, não defeito:**
 
-- O Mac fica mudo enquanto o player segura o device — **inclusive pausado**. É de propósito:
-  soltar o device na pausa tiraria a garantia de retomar na hora e sem risco de outro app tomar
-  o device nesse meio-tempo. O hog mode só é liberado quando a faixa termina ou o player fecha.
+- O Mac fica mudo enquanto o player segura o device — **inclusive pausado, e inclusive depois
+  que a faixa termina**. Na pausa é de propósito: soltar o device tiraria a garantia de
+  retomar na hora e sem risco de outro app tomar o device nesse meio-tempo. Já no fim da faixa
+  é um efeito colateral de como o código está hoje: só a reprodução para (`AudioDeviceStop`) —
+  o hog mode continua retido até carregar outra faixa ou fechar o player. Soltá-lo
+  automaticamente nesse ponto seria arriscado, porque quem detecta o fim é o `snapshot()` da
+  interface, chamado a 10 Hz, e a restauração pode levar segundos.
 - Encerrar o processo à força (force-quit, `kill -9`) devolve o modo exclusivo pelo sistema,
   mas deixa o **sample rate trocado**; corrige tocando qualquer outra coisa ou pelo
   Configuração de Áudio e MIDI.
@@ -168,13 +172,33 @@ e mostrar título, artista, álbum e capa quando embutida.
 ## As três provas de bit-perfect
 
 É o que diferencia este projeto de um tocador comum: qualquer alteração no caminho do áudio
-tem que continuar batendo nas três.
+tem que continuar batendo nas três. As três rodam pelo modo `--dump`, que passa por
+decodificador, ring buffer e alinhamento de frame — mas **não registra o
+`AudioDeviceIOProc`**: nenhuma das três executa uma linha do callback de tempo real.
 
 ```
 make verify FILE=testdata/t96_24.flac BITS=24  # C++ e Rust batem, amostra a amostra, com o PCM do ffmpeg
-make verify-pause FILE=testdata/t96_24.flac    # pausar no meio não descarta nem duplica byte do ring buffer
-make verify-volume FILE=testdata/t96_24.flac   # volume muda no device, nunca nas amostras entregues
+make verify-pause FILE=testdata/t96_24.flac    # o consumidor parar no meio não descarta nem duplica byte do ring buffer
+make verify-volume FILE=testdata/t96_24.flac   # o volume muda no device, nunca nas amostras que o dump grava
 ```
+
+O que cada uma prova de fato, e o que fica de fora:
+
+- **`verify`**: compara byte a byte o que C++, Rust e o `ffmpeg` produzem a partir do mesmo
+  arquivo. Cobre decodificador, ring buffer e alinhamento de frame — de onde saíram os bugs
+  mais caros até aqui.
+- **`verify-pause`**: `--pause-at` dorme *dentro do laço do dump*, não chama `Engine::pause`.
+  O que ela prova é que o ring buffer sobrevive a um consumidor que para de ler por um tempo e
+  retoma sem perder nem repetir byte — não que o `pause()` de verdade do engine seja
+  bit-perfect (esse caminho passa pelo `HoggedDevice::stop`/`resume`, que ela não exercita).
+- **`verify-volume`**: o modo dump adquire o device de verdade e aplica nele o volume pedido,
+  então prova que baixar ou subir o volume não muda uma amostra sequer do que o dump grava.
+  Não prova a ausência de ganho em software em qualquer condição: um ganho aplicado *dentro*
+  do `AudioDeviceIOProc` passaria despercebido pelas três, porque nenhuma o executa.
+
+Isso não diminui o valor delas — é o que garante, a cada mudança, que a fatia do caminho antes
+do IOProc continua intacta —, só marca onde a cobertura para: o callback de tempo real em si
+só é validado ouvindo a reprodução de verdade ou inspecionando o código sob `make cpp-asan`.
 
 ## Estrutura
 

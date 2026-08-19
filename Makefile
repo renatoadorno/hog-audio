@@ -78,8 +78,9 @@ verify-pause: rust
 	  && echo "pause: fluxo identico com e sem pausa"
 
 # make verify-volume FILE=testdata/t96_24.flac
-# O volume e aplicado no device, nunca nas amostras. O modo dump adquire o device e aplica
-# o volume de verdade, entao este teste reprova se alguem implementar ganho em software.
+# O volume e aplicado no device, nunca nas amostras que o dump grava. O modo dump adquire o
+# device e aplica o volume de verdade, mas nao registra o AudioDeviceIOProc: um ganho aplicado
+# dentro do callback de reproducao passaria despercebido por este teste (ver README).
 verify-volume: rust
 	@test -n "$(FILE)" || { echo "uso: make verify-volume FILE=arquivo.flac"; exit 2; }
 	@./$(RUST_BIN) --dump /tmp/hog_vol20.raw --volume 20 "$(FILE)" >/dev/null
