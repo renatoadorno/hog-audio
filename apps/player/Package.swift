@@ -17,6 +17,7 @@ let package = Package(
     targets: [
         .target(name: "HogAudioFFI"),
         .target(name: "HogAudioBindings", dependencies: ["HogAudioFFI"]),
+        .target(name: "HogPlayerKit", dependencies: ["HogAudioBindings"]),
         .executableTarget(
             name: "HogPlayer",
             dependencies: ["HogAudioBindings"],
@@ -24,7 +25,7 @@ let package = Package(
         ),
         .testTarget(
             name: "HogPlayerKitTests",
-            dependencies: ["HogAudioBindings"],
+            dependencies: ["HogPlayerKit"],
             linkerSettings: linkRust
         ),
     ]
