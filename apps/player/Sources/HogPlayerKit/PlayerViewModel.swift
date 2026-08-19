@@ -30,6 +30,12 @@ public final class PlayerViewModel: ObservableObject {
     private var format: TrackFormat?
     private var timer: Timer?
 
+    /// O volume que o usuário pediu por último e que ainda não foi ao hardware, e se já há um
+    /// worker drenando. Ambos vivem na main actor, então o arrasto os atualiza sem trava.
+    /// Ver `applyVolume()`.
+    private var volumeDesejado: Double?
+    private var escrevendoVolume = false
+
     /// Incrementado a cada `open()`: a task de metadados de uma abertura mais antiga que
     /// aterrissa depois de uma mais nova não pode sobrescrever o que já está na tela.
     private var openGeneration = 0
@@ -167,28 +173,40 @@ public final class PlayerViewModel: ObservableObject {
         // falhar calado aqui, como o shutdown, deixaria o usuário sem saber que o device não
         // mudou de verdade.
         //
-        // O `Slider` chama isto continuamente durante o arrasto, não só ao soltar — tirar o
-        // trabalho da main actor removeu de graça a serialização que ela dava, e nada a
-        // substituiu: sem encadear, cada chamada dispara uma `Task.detached` independente, e
-        // nada garante que cheguem ao hardware na ordem em que o usuário pediu (o mutex do
-        // lado Rust serializa exclusão mútua, não ordem de chegada — ao contrário de
-        // `play()`/`pause()`, `set_volume` não tem guarda de estado que reprove um pedido fora
-        // de ordem). Encadear na `pendingCommand` anterior preserva a ordem sem voltar a
-        // bloquear a main actor: a task só chama o engine depois que a anterior terminou.
-        let previous = pendingCommand
+        // O `Slider` chama isto continuamente durante o arrasto, não só ao soltar. Duas
+        // exigências entram em conflito aqui: as escritas não podem chegar ao hardware fora
+        // de ordem (o mutex do lado Rust dá exclusão mútua, não ordem de chegada — e ao
+        // contrário de `play()`/`pause()`, `set_volume` não tem guarda de estado que reprove
+        // um pedido atrasado), e o som tem de acompanhar o dedo.
+        //
+        // Encadear uma task por pedido resolvia a ordem e criava a fila: o custo virava
+        // (pedidos × custo da escrita), drenando muito depois de o usuário soltar o controle.
+        // Um worker só, com o pedido mais recente sobrescrevendo o anterior, resolve as duas:
+        // a ordem é garantida por construção — só existe um escritor — e o arrasto todo
+        // custa uma escrita, não uma por quadro. O hardware não precisa dos valores
+        // intermediários, precisa do valor em que o dedo parou.
+        volumeDesejado = scalar
+        guard !escrevendoVolume else { return }
+        escrevendoVolume = true
         pendingCommand = Task {
-            await previous?.value
-            do {
-                try await Task.detached { [player] in
-                    try player.setVolume(scalar: Float(scalar))
-                }.value
-                errorMessage = nil
-            } catch {
-                // O valor publicado tem de dizer a verdade: se o device recusou, o slider não
-                // pode continuar exibindo o pedido como se tivesse sido aceito. O snapshot é a
-                // fonte confiável do volume real, mantida pelo engine — nada de cache próprio.
-                volume = Double(player.snapshot().volumeScalar)
-                errorMessage = "\(error)"
+            defer { escrevendoVolume = false }
+            while let alvo = volumeDesejado {
+                volumeDesejado = nil
+                do {
+                    try await Task.detached { [player] in
+                        try player.setVolume(scalar: Float(alvo))
+                    }.value
+                    errorMessage = nil
+                } catch {
+                    // O valor publicado tem de dizer a verdade: se o device recusou, o slider
+                    // não pode continuar exibindo o pedido como se tivesse sido aceito. O
+                    // snapshot é a fonte confiável do volume real, mantida pelo engine — nada
+                    // de cache próprio. Pedidos ainda pendentes são descartados junto: insistir
+                    // com o resto do arrasto por cima de uma recusa só repetiria o erro.
+                    volumeDesejado = nil
+                    volume = Double(player.snapshot().volumeScalar)
+                    errorMessage = "\(error)"
+                }
             }
         }
     }

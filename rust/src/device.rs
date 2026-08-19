@@ -348,6 +348,10 @@ impl HoggedDevice {
     /// após uma reconfiguração de formato — devolvendo noErr e, pior, um valor de cache que
     /// faz a conferência imediata passar. Sem isto, o volume pedido pode simplesmente não
     /// valer, e o som sai no volume anterior.
+    ///
+    /// Por isso a espera de 30 ms antes de cada conferência: é o que torna a leitura capaz de
+    /// discordar. Custa caro, então só o caminho de aquisição usa esta versão — uma vez por
+    /// device tomado. Para as escritas do slider, ver `write_volume_now`.
     fn write_volume_confirmed(&self, target: f32) -> bool {
         let address = property_address(kAudioDevicePropertyVolumeScalar, SCOPE_OUTPUT);
         for _ in 0..20 {
@@ -364,9 +368,26 @@ impl HoggedDevice {
         false
     }
 
-    /// Ajusta o volume e guarda o anterior para devolvê-lo junto com o resto do estado.
-    /// Chamar antes de `start`: depois, som já teria saído no volume antigo.
-    pub fn set_volume(&mut self, scalar: f32) -> Result<(), String> {
+    /// Escreve o volume com o device já estável e confere na hora, sem espera.
+    ///
+    /// O cache que obriga `write_volume_confirmed` a dormir aparece logo após reconfigurar o
+    /// formato. Com o device estável o comportamento medido é outro: em 20 escritas isoladas,
+    /// lidas só 250 ms depois — tarde demais para qualquer cache curto mascarar um descarte —,
+    /// nenhuma foi perdida; e uma rajada de 30 escritas seguidas deixou o hardware no último
+    /// valor pedido. A leitura de conferência custa 0,17 ms; a espera que ela substitui,
+    /// 30 ms. Como o slider escreve a cada quadro do arrasto, essa diferença é a diferença
+    /// entre o som acompanhar o controle e chegar segundos depois.
+    fn write_volume_now(&self, target: f32) -> bool {
+        let address = property_address(kAudioDevicePropertyVolumeScalar, SCOPE_OUTPUT);
+        set_property(self.device_id, &address, &target);
+        match get_property::<f32>(self.device_id, &address) {
+            Ok(current) => (current - target).abs() < 0.005,
+            Err(_) => false,
+        }
+    }
+
+    /// Checagens comuns aos dois caminhos de escrita, incluindo guardar o volume anterior.
+    fn prepare_volume_write(&mut self, scalar: f32) -> Result<f32, String> {
         let scalar = scalar.clamp(0.0, 1.0);
         let address = property_address(kAudioDevicePropertyVolumeScalar, SCOPE_OUTPUT);
 
@@ -384,10 +405,30 @@ impl HoggedDevice {
             })?;
             self.original_volume = current;
         }
+        Ok(scalar)
+    }
 
+    /// Ajusta o volume e guarda o anterior para devolvê-lo junto com o resto do estado.
+    /// Chamar antes de `start`: depois, som já teria saído no volume antigo.
+    ///
+    /// Esta é a escrita da aquisição, logo depois de reconfigurar o formato — a única
+    /// condição em que o HAL descarta a escrita em silêncio, então é aqui que a conferência
+    /// cara se paga.
+    pub fn set_volume(&mut self, scalar: f32) -> Result<(), String> {
+        let scalar = self.prepare_volume_write(scalar)?;
         if !self.write_volume_confirmed(scalar) {
             return Err("o device não assumiu o volume pedido; não vou tocar sem essa garantia"
                 .to_string());
+        }
+        Ok(())
+    }
+
+    /// Ajusta o volume durante a reprodução, com o device já configurado e estável — o
+    /// caminho do slider. Confere na hora em vez de esperar; ver `write_volume_now`.
+    pub fn set_volume_interactive(&mut self, scalar: f32) -> Result<(), String> {
+        let scalar = self.prepare_volume_write(scalar)?;
+        if !self.write_volume_now(scalar) {
+            return Err("o device não assumiu o volume pedido".to_string());
         }
         Ok(())
     }
@@ -527,6 +568,25 @@ mod tests {
 
     // Requerem hardware e tomam o device por 1-2 segundos: rodar com
     //   cargo test -- --ignored --test-threads=1
+    // Em paralelo eles disputam o mesmo device e reprovam sem que haja defeito nenhum — daí
+    // o `--test-threads=1`, que o alvo `make hw-test` já traz.
+
+    /// Lê o rate direto do device que o teste tem na mão.
+    ///
+    /// Nunca via `query_default_output_device()`: sob hog mode o macOS aponta o "default
+    /// output" para OUTRO hardware, e a leitura volta o rate do device errado. Foi assim que
+    /// `toma_o_device_e_restaura` passou a reprovar sem que houvesse defeito — ele conferia o
+    /// rate das caixas embutidas enquanto segurava o fone.
+    fn rate_do_hardware(id: AudioObjectID) -> f64 {
+        get_property::<f64>(id, &property_address(kAudioDevicePropertyNominalSampleRate, SCOPE_GLOBAL))
+            .expect("ler o nominal rate do device")
+    }
+
+    /// Mesmo motivo de `rate_do_hardware`, para o volume.
+    fn volume_do_hardware(id: AudioObjectID) -> f32 {
+        get_property::<f32>(id, &property_address(kAudioDevicePropertyVolumeScalar, SCOPE_OUTPUT))
+            .expect("ler o volume do device")
+    }
     #[test]
     #[ignore]
     fn toma_o_device_e_restaura() {
@@ -550,7 +610,7 @@ mod tests {
                 .acquire(&device, alvo, &device.physical_formats[idx])
                 .expect("acquire deveria funcionar");
 
-            let agora = query_default_output_device().expect("device").nominal_rate;
+            let agora = rate_do_hardware(device.id);
             assert!(
                 same_rate(agora, alvo),
                 "device deveria estar travado em {alvo}, está em {agora}"
@@ -558,7 +618,7 @@ mod tests {
         } // Drop restaura
 
         std::thread::sleep(std::time::Duration::from_millis(500));
-        let depois = query_default_output_device().expect("device").nominal_rate;
+        let depois = rate_do_hardware(device.id);
         assert!(
             same_rate(depois, rate_antes),
             "rate deveria voltar a {rate_antes}, está em {depois}"
@@ -693,7 +753,7 @@ mod tests {
         }
 
         std::thread::sleep(std::time::Duration::from_millis(500));
-        let depois = query_default_output_device().expect("device").volume;
+        let depois = volume_do_hardware(device.id);
         assert!(
             (depois - original).abs() < 0.01,
             "volume deveria voltar a {original}, está em {depois}"

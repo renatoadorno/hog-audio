@@ -32,6 +32,9 @@ final class FakePlayer: HogPlayerProtocol, @unchecked Sendable {
     // comparação abaixo não sofre de arredondamento.
     var atrasoDeVolume: TimeInterval = 0
     var escalarComAtraso: Float?
+    // Quantas vezes o volume chegou de fato ao "hardware". O slider emite um pedido por
+    // quadro do arrasto; o que não pode acontecer é cada um deles virar uma escrita.
+    var escritasDeVolume = 0
 
     func load(path: String) throws -> TrackFormat {
         if path == caminhoComAtraso, atrasoDeCarga > 0 {
@@ -56,6 +59,7 @@ final class FakePlayer: HogPlayerProtocol, @unchecked Sendable {
             Thread.sleep(forTimeInterval: atrasoDeVolume)
         }
         lock.lock(); defer { lock.unlock() }
+        escritasDeVolume += 1
         if let falha = falhaAoAplicarVolume { throw falha }
         volumeAplicado = scalar
         volumeReal = scalar
@@ -147,6 +151,25 @@ final class FakePlayer: HogPlayerProtocol, @unchecked Sendable {
     await primeira?.value
 
     #expect(fake.volumeAplicado == 0.75)
+}
+
+@Test @MainActor func oArrastoDoSliderNaoViraUmaEscritaPorQuadro() async {
+    let fake = FakePlayer()
+    let model = PlayerViewModel(player: fake)
+
+    // Um arrasto de slider emite um pedido por quadro. Encadear um comando por pedido faz a
+    // fila drenar muito depois de o usuário soltar o controle: com 30 ms de espera por
+    // escrita — o que o `write_volume_confirmed` do lado Rust cobrava —, 50 quadros viravam
+    // 1,5 s de atraso. O que o hardware precisa é do último valor, não de todos eles.
+    for i in 0..<50 {
+        model.applyVolume(Double(i) / 50.0)
+    }
+    await model.pendingCommand?.value
+
+    #expect(fake.escritasDeVolume < 50)
+    // Coalescer não pode custar o destino: o valor que o usuário parou é o que vale.
+    #expect(fake.volumeAplicado == Float(49.0 / 50.0))
+    #expect(model.volume == 49.0 / 50.0)
 }
 
 @Test @MainActor func erroDeVolumeSomeDepoisDeUmComandoBemSucedido() async {

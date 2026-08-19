@@ -311,7 +311,10 @@ impl Engine {
         });
         match inner.hogged.as_mut() {
             Some(hogged) => {
-                hogged.set_volume(scalar)?;
+                // Interativa: o device já está configurado e estável aqui, então esta escrita
+                // confere na hora em vez de esperar 30 ms como a da aquisição. O slider chama
+                // isto a cada quadro do arrasto — ver `HoggedDevice::write_volume_now`.
+                hogged.set_volume_interactive(scalar)?;
                 if let Some((current, _)) = hogged.read_volume() {
                     self.status.set_volume(current);
                 } else {
