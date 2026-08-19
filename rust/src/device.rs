@@ -205,7 +205,22 @@ impl HoggedDevice {
 
         self.device_id = device.id;
         self.stream_id = device.stream_id;
-        self.original_rate = device.nominal_rate;
+
+        // `device.nominal_rate` pode ter sido lido com o hardware ainda retido por uma sessão
+        // anterior: `Engine::load` consulta o device antes de soltá-lo, de propósito, para
+        // poder negociar sem apagar a faixa em reprodução se a negociação falhar. Um valor
+        // cacheado dessa consulta não é o rate original do hardware — é o rate que a própria
+        // sessão anterior impôs. Confiar nele aqui gravaria o restaurar errado e, se coincidir
+        // com o rate da faixa nova, também pularia a troca de rate (`same_rate` abaixo) com o
+        // hardware já devolvido a outra taxa por baixo. A fonte da verdade tem que ser o
+        // hardware agora, com o device já livre — `stop_and_release` sempre roda antes de
+        // qualquer `acquire` —, tanto para o que restaurar quanto para decidir a troca.
+        let rate_address = property_address(kAudioDevicePropertyNominalSampleRate, SCOPE_GLOBAL);
+        let live_rate = get_property::<f64>(self.device_id, &rate_address).map_err(|_| {
+            "não consegui ler o sample rate atual do device para poder restaurá-lo depois"
+                .to_string()
+        })?;
+        self.original_rate = live_rate;
 
         let physical_address = property_address(kAudioStreamPropertyPhysicalFormat, SCOPE_GLOBAL);
         let virtual_address = property_address(kAudioStreamPropertyVirtualFormat, SCOPE_GLOBAL);
@@ -243,8 +258,7 @@ impl HoggedDevice {
             return Err(format!("o device já está tomado pelo processo {owner}"));
         }
 
-        let rate_address = property_address(kAudioDevicePropertyNominalSampleRate, SCOPE_GLOBAL);
-        if !same_rate(device.nominal_rate, rate) {
+        if !same_rate(live_rate, rate) {
             let status = set_property(self.device_id, &rate_address, &rate);
             if status != 0 {
                 return Err(format!(
@@ -543,6 +557,106 @@ mod tests {
         assert!(
             same_rate(depois, rate_antes),
             "rate deveria voltar a {rate_antes}, está em {depois}"
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn acquire_ignora_nominal_rate_cacheado_e_le_o_hardware_ao_vivo() {
+        // Reproduz, no nível onde a correção mora, o bug mais grave da onda: `Engine::load()`
+        // consulta o device *antes* de `stop_and_release` devolvê-lo (de propósito, para
+        // poder negociar sem apagar a faixa em reprodução se a negociação falhar) — então,
+        // com uma faixa ainda tocando, essa consulta pode trazer um `OutputDevice.nominal_rate`
+        // que é, na verdade, o rate que a própria sessão em curso impôs, não o rate original.
+        // Uma reprodução fiel via `Engine` inteiro não é confiável neste hardware: com fone
+        // conectado, o macOS aponta o "device de saída padrão" para as caixas embutidas
+        // enquanto o fone está retido (o mesmo efeito descrito no README, seção Volume) — a
+        // consulta feita durante o hog acerta outro device físico, não o mesmo device com um
+        // rate desatualizado. Este teste isola só o mecanismo que `acquire()` de fato controla:
+        // simula o `OutputDevice` "stale" que `load()` produziria, sem depender de qual device
+        // o macOS resolve chamar de "padrão" nesse meio-tempo.
+        let device = query_default_output_device().expect("device");
+        let rate_original = device.nominal_rate;
+
+        let rate_a = if same_rate(rate_original, 44100.0) {
+            48000.0
+        } else {
+            44100.0
+        };
+        let rate_b = if same_rate(rate_a, 96000.0) || same_rate(rate_original, 96000.0) {
+            88200.0
+        } else {
+            96000.0
+        };
+        assert!(
+            !same_rate(rate_a, rate_b),
+            "rate_a e rate_b precisam diferir para o teste fazer sentido"
+        );
+
+        let idx_a = device
+            .caps
+            .physical_formats
+            .iter()
+            .position(|f| same_rate(f.sample_rate, rate_a))
+            .expect("device deveria oferecer formato no rate_a");
+        let idx_b = device
+            .caps
+            .physical_formats
+            .iter()
+            .position(|f| same_rate(f.sample_rate, rate_b))
+            .expect("device deveria oferecer formato no rate_b");
+
+        // Sessão A: toma o device em rate_a e solta — o hardware volta a rate_original.
+        {
+            let mut hog_a = HoggedDevice::new();
+            hog_a
+                .acquire(&device, rate_a, &device.physical_formats[idx_a])
+                .expect("acquire A deveria funcionar");
+        } // Drop restaura
+
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let depois_de_a = query_default_output_device().expect("device").nominal_rate;
+        assert!(
+            same_rate(depois_de_a, rate_original),
+            "pré-condição do teste falhou: deveria estar em {rate_original} depois da sessão \
+             A, está em {depois_de_a}"
+        );
+
+        // Simula o `OutputDevice` que `load()` produziria se consultasse o device ainda retido
+        // pela sessão A: mesmo id/stream/caps, mas `nominal_rate` travado no valor que a sessão
+        // A impôs — o hardware real já voltou a `rate_original`, só este campo ficou
+        // desatualizado, exatamente como uma consulta feita com o device ainda hogado faria.
+        let mut device_stale = query_default_output_device().expect("device");
+        device_stale.nominal_rate = rate_a;
+
+        // Sessão B: adquire com o `OutputDevice` stale, pedindo um rate diferente de ambos.
+        let mut hog_b = HoggedDevice::new();
+        hog_b
+            .acquire(&device_stale, rate_b, &device.physical_formats[idx_b])
+            .expect("acquire B deveria funcionar");
+
+        // A prova direta: `restore()` depois de setar o rate errado também seta o formato
+        // físico salvo em `original_physical` — que É lido ao vivo, sem passar pelo campo
+        // problemático —, e em muitos devices isso arrasta o rate nominal junto, mascarando o
+        // sintoma observável no hardware. Por isso a checagem que não pode ser mascarada é no
+        // campo privado que a correção passou a preencher com uma leitura ao vivo, não com
+        // `device_stale.nominal_rate` (o valor propositalmente desatualizado, rate_a).
+        // Acessível porque `tests` é submódulo de `device`, do mesmo jeito que
+        // `engine::tests` acessa o campo privado `EngineInner::source`.
+        assert!(
+            same_rate(hog_b.original_rate, rate_original),
+            "original_rate deveria ser o rate lido ao vivo do hardware ({rate_original} Hz), \
+             não o nominal_rate cacheado passado em `device` ({rate_a} Hz); ficou em {}",
+            hog_b.original_rate
+        );
+
+        drop(hog_b); // Drop restaura
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let rate_final = query_default_output_device().expect("device").nominal_rate;
+        assert!(
+            same_rate(rate_final, rate_original),
+            "o device deveria voltar a {rate_original} Hz (o original de antes de qualquer \
+             hog), está em {rate_final} Hz"
         );
     }
 
