@@ -27,8 +27,10 @@ pub struct Playback {
     pub scratch: UnsafeCell<Vec<u8>>, // pré-alocado: o IOProc não pode alocar
 }
 
-// `scratch` só é tocado pelo consumidor, que é uma thread só — o IOProc na reprodução, ou o
-// laço de dump. O contrato é o mesmo do RingBuffer: um produtor, um consumidor.
+// `scratch` só é tocado pelo IOProc, que o Core Audio invoca numa única thread de tempo real
+// por vez; o laço de `--dump` (`run_dump`, em `main.rs`) não usa `scratch` — ele lê
+// `playback.ring` direto. O contrato é o mesmo do RingBuffer: um produtor (a thread que
+// decodifica) e um consumidor por vez (o IOProc ou o laço de dump, nunca os dois juntos).
 unsafe impl Sync for Playback {}
 unsafe impl Send for Playback {}
 
