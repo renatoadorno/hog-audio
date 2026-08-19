@@ -196,6 +196,11 @@ impl Engine {
         self.teardown(&mut inner);
 
         let device_name = device.name.clone();
+        // Hoje inalcançável: `next_state(_, Load)` é catch-all `Ok` (ver `transitions.rs`), e
+        // este `?` nunca dispara. Mas se `Load` um dia puder ser recusado nalgum estado, ele
+        // dispararia *depois* de `teardown` já ter apagado a faixa anterior — exatamente o bug
+        // que o comentário acima de `stop_and_release`/`teardown` existe para evitar. Quem
+        // tornar `Load` falível precisa mover esta checagem para antes do teardown.
         let target = next_state(inner.state, Command::Load).map_err(|e| e.message.to_string())?;
 
         inner.path = Some(path.to_string());
@@ -270,6 +275,18 @@ impl Engine {
 
     pub fn set_volume(&self, scalar: f32) -> Result<(), String> {
         let mut inner = self.lock();
+        // Guardado sempre, não só quando falta o device: se `hogged` está com o device na mão
+        // agora, a faixa pode terminar e a próxima aquisição começa chamando
+        // `stop_and_release`, que restaura o volume pré-hog — sem este pedido persistido,
+        // `apply_volume` rodaria com `inner.volume == None` e aplicaria só o teto sobre essa
+        // leitura antiga, descartando o que o usuário escolheu (e podendo até subir o volume).
+        // `value` é escalar de 0 a 1 quando a unidade é porcentagem — não 0 a 100.
+        inner.volume = Some(VolumeRequest {
+            valid: true,
+            unit: VolumeUnit::Percent,
+            value: scalar as f64,
+            reason: String::new(),
+        });
         match inner.hogged.as_mut() {
             Some(hogged) => {
                 hogged.set_volume(scalar)?;
@@ -280,14 +297,6 @@ impl Engine {
                 }
             }
             None => {
-                // Sem device na mão, guarda para aplicar na aquisição. `value` é escalar de
-                // 0 a 1 quando a unidade é porcentagem — não 0 a 100.
-                inner.volume = Some(VolumeRequest {
-                    valid: true,
-                    unit: VolumeUnit::Percent,
-                    value: scalar as f64,
-                    reason: String::new(),
-                });
                 self.status.set_volume(scalar);
             }
         }
@@ -362,15 +371,29 @@ impl Engine {
         let physical = device.physical_formats[decision.physical_format_index as usize];
         hogged.acquire(device, decision.sample_rate, &physical)?;
 
+        // Dali em diante, nenhum erro pode propagar com um `?` solto: `hogged` ainda é local,
+        // não movida para `inner.hogged`, e um `?` a derrubaria — o `Drop::restore()` rodaria,
+        // mas `restore_error` seria descartado junto, e como `inner.hogged` continuaria `None`
+        // um `shutdown()` posterior cairia no ramo `None => Ok(())` e mentiria sucesso mesmo
+        // com a restauração tendo falhado. `finish_with_error` fecha essa fresta: finaliza
+        // `hogged` explicitamente e concatena os dois erros, para nenhum se perder.
+
         // Com o device já nosso e antes de qualquer amostra sair: é o único ponto em que dá
         // para garantir que o fone não receba o volume anterior. A publicação no
         // `SharedStatus` fica para o fim da função — ver o comentário perto de
         // `self.status.set_volume` mais abaixo.
-        let outcome = apply_volume(&mut hogged, device, inner.volume.as_ref(), inner.ceiling)?;
+        let outcome = match apply_volume(&mut hogged, device, inner.volume.as_ref(), inner.ceiling)
+        {
+            Ok(outcome) => outcome,
+            Err(error) => return Err(finish_with_error(hogged, error)),
+        };
 
         let stream = hogged.stream_format();
         if stream.mFormatID != coreaudio_sys::kAudioFormatLinearPCM {
-            return Err("o device não está em PCM linear; não vou alimentá-lo".to_string());
+            return Err(finish_with_error(
+                hogged,
+                "o device não está em PCM linear; não vou alimentá-lo".to_string(),
+            ));
         }
 
         let (client, non_interleaved) = crate::engine::client_format_for(&stream);
@@ -380,15 +403,25 @@ impl Engine {
             client.mChannelsPerFrame,
         );
         if !check.ok {
-            return Err(format!("formato de entrega inconsistente: {}", check.reason));
+            return Err(finish_with_error(
+                hogged,
+                format!("formato de entrega inconsistente: {}", check.reason),
+            ));
         }
 
-        source.set_client_format(&client)?;
+        if let Err(error) = source.set_client_format(&client) {
+            return Err(finish_with_error(hogged, error));
+        }
 
         // O decodificador pode ajustar o que aceitou. Divergência aqui é a diferença entre
         // silêncio e ruído em volume total.
-        let effective = source.effective_client_format()?;
-        crate::engine::assert_same_delivery(&effective, &client)?;
+        let effective = match source.effective_client_format() {
+            Ok(effective) => effective,
+            Err(error) => return Err(finish_with_error(hogged, error)),
+        };
+        if let Err(error) = crate::engine::assert_same_delivery(&effective, &client) {
+            return Err(finish_with_error(hogged, error));
+        }
 
         let ring_bytes = client.mSampleRate as usize * client.mBytesPerFrame as usize * 2;
         self.status.set_track(source.total_frames(), file_format.sample_rate);
@@ -457,7 +490,7 @@ impl Engine {
                 // ring buffer que nenhum consumidor vai esvaziar.
                 stop.store(true, std::sync::atomic::Ordering::Relaxed);
                 let _ = producer.join();
-                return Err(error);
+                return Err(finish_with_error(hogged, error));
             }
         }
 
@@ -536,6 +569,16 @@ impl Drop for Engine {
     fn drop(&mut self) {
         let mut inner = self.lock();
         let _ = self.stop_and_release(&mut inner);
+    }
+}
+
+/// Consome o `HoggedDevice` e concatena ao erro original o que a restauração relatar, para que
+/// um erro entre `acquire()` e a atribuição a `inner.hogged` nunca engula o outro — ver o
+/// comentário em `start_common` sobre por que um `?` solto ali é o bug.
+fn finish_with_error(mut hogged: HoggedDevice, error: String) -> String {
+    match hogged.finish() {
+        Ok(()) => error,
+        Err(restore_error) => format!("{error}; além disso, a restauração falhou: {restore_error}"),
     }
 }
 
@@ -718,12 +761,24 @@ mod tests {
     }
 
     #[test]
+    fn finish_with_error_preserva_o_erro_original_quando_nao_ha_nada_a_restaurar() {
+        // Não precisa de hardware: um `HoggedDevice` que nunca passou por `acquire()` não tem
+        // nada para `finish()` desfazer, e `finish()` devolve `Ok(())`. O que isto prova é que
+        // `finish_with_error` não inventa sucesso nem troca o erro original por outra coisa
+        // nesse caminho — a rota que um `restore_error` de verdade percorreria só é
+        // exercitável com um device real recusando a restauração, fora do alcance de um teste
+        // sem hardware.
+        let hogged = HoggedDevice::new();
+        let erro = finish_with_error(hogged, "erro original".to_string());
+        assert_eq!(erro, "erro original");
+    }
+
+    #[test]
     #[ignore = "precisa de um device de saída real"]
     fn load_de_flac_valido_vai_para_loaded() {
         let path = "../testdata/t96_24.flac";
         if !std::path::Path::new(path).exists() {
-            eprintln!("pulando: {path} não existe (gere com ffmpeg)");
-            return;
+            panic!("fixture ausente: {path} (gere com ffmpeg)");
         }
         let engine = Engine::new();
         let track = engine.load(path).expect("deveria carregar");
@@ -744,8 +799,7 @@ mod tests {
         let a = "../testdata/t96_24.flac";
         let b = "../testdata/t44_16.flac";
         if !std::path::Path::new(a).exists() || !std::path::Path::new(b).exists() {
-            eprintln!("pulando: testdata ausente");
-            return;
+            panic!("fixture ausente: {a} ou {b} (gere com ffmpeg)");
         }
         let engine = Engine::new();
         engine.load(a).expect("deveria carregar o primeiro");
@@ -762,8 +816,7 @@ mod tests {
         let anterior = "../testdata/t96_24.flac";
         let recusado = "../testdata/t192_24.flac";
         if !std::path::Path::new(anterior).exists() || !std::path::Path::new(recusado).exists() {
-            eprintln!("pulando: testdata ausente");
-            return;
+            panic!("fixture ausente: {anterior} ou {recusado} (gere com ffmpeg)");
         }
         let engine = Engine::new();
         engine.load(anterior).expect("deveria carregar a primeira faixa");
@@ -791,8 +844,7 @@ mod tests {
     fn ciclo_play_pause_play_shutdown() {
         let path = "../testdata/t96_24.flac";
         if !std::path::Path::new(path).exists() {
-            eprintln!("pulando: {path} não existe (gere com ffmpeg)");
-            return;
+            panic!("fixture ausente: {path} (gere com ffmpeg)");
         }
         let engine = Engine::new();
         engine.load(path).expect("deveria carregar");
@@ -843,8 +895,7 @@ mod tests {
 
         let path = "../testdata/t44_16.flac";
         if !std::path::Path::new(path).exists() {
-            eprintln!("pulando: {path} não existe (gere com ffmpeg)");
-            return;
+            panic!("fixture ausente: {path} (gere com ffmpeg)");
         }
         let engine = Engine::new();
         engine.load(path).expect("deveria carregar");
@@ -907,6 +958,69 @@ mod tests {
         assert!(
             (rate - 44100.0).abs() < 0.5,
             "o sample rate deveria continuar em 44100 Hz (o negociado) durante a segunda              reprodução; {rate} Hz denunciaria o Drop do HoggedDevice antigo revertendo para              a taxa pré-hog"
+        );
+
+        engine.shutdown().expect("deveria restaurar o device depois da segunda reprodução");
+        assert_eq!(engine.state(), PlayerState::Idle);
+    }
+
+    #[test]
+    #[ignore = "precisa de um device de saída real; toma o device por alguns segundos e mexe no volume"]
+    fn volume_baixado_durante_a_reproducao_sobrevive_ao_fim_da_faixa() {
+        // Reproduz o bug: o usuário baixa o volume enquanto o device está retido (`hogged` é
+        // `Some`), a faixa termina, e o player toca de novo. Sem persistir o pedido em
+        // `inner.volume` nesse ramo, `stop_and_release` restaura o volume pré-hog e a
+        // aquisição seguinte aplica só o teto sobre essa leitura — o volume escolhido pelo
+        // usuário some, e pode até subir.
+        let path = "../testdata/t96_24.flac";
+        if !std::path::Path::new(path).exists() {
+            panic!("fixture ausente: {path} (gere com ffmpeg)");
+        }
+
+        let engine = Engine::new();
+        engine.load(path).expect("deveria carregar");
+        engine.play().expect("deveria tocar");
+        assert_eq!(engine.state(), PlayerState::Playing);
+
+        // Bem abaixo do teto padrão (50%): se o pedido não persistir, a aquisição seguinte
+        // aplicaria o teto sobre a leitura pré-hog, que fica livre para ficar bem acima disto.
+        engine.set_volume(0.05).expect("deveria conseguir baixar o volume com o device na mão");
+        assert!(
+            matches!(
+                engine.lock().volume,
+                Some(ref request) if (request.value - 0.05).abs() < 1e-9
+            ),
+            "o pedido de volume deveria ficar guardado em inner.volume mesmo com o device retido"
+        );
+
+        // Força o fim da faixa do jeito que o IOProc real marcaria — mesma técnica do teste
+        // `tocar_de_novo_apos_o_fim_nao_duplica_a_posse_do_device` logo acima.
+        {
+            let inner = engine.lock();
+            inner
+                .playback
+                .as_ref()
+                .expect("deveria ter playback depois de tocar")
+                .finished
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+        engine.poll_finished();
+        assert_eq!(engine.state(), PlayerState::Finished);
+
+        engine
+            .play()
+            .expect("a segunda reprodução deveria funcionar depois do fim da primeira");
+        assert_eq!(engine.state(), PlayerState::Playing);
+
+        let outcome = engine
+            .volume_outcome()
+            .expect("deveria ter um resultado de volume depois da segunda aquisição");
+        assert!(
+            (outcome.scalar - 0.05).abs() < 0.02,
+            "o volume da segunda reprodução deveria continuar em torno de 5% (o pedido do \
+             usuário), está em {:.0}% — sinal de que o pedido foi descartado e o teto foi \
+             aplicado por cima da leitura pré-hog",
+            outcome.scalar * 100.0
         );
 
         engine.shutdown().expect("deveria restaurar o device depois da segunda reprodução");
