@@ -959,13 +959,6 @@ struct EngineInner {
     source: Option<AudioSource>,
     device: Option<OutputDevice>,
     decision: Option<Decision>,
-    client: Option<AudioStreamBasicDescription>,
-    hogged: Option<HoggedDevice>,
-    playback: Option<Arc<Playback>>,
-    producer: Option<JoinHandle<()>>,
-    stop_producer: Arc<AtomicBool>,
-    volume: Option<VolumeRequest>,
-    ceiling: f64,
 }
 
 /// O mesmo padrão da CLI: sem `--volume` explícito, o device é baixado para no máximo isto.
@@ -1070,15 +1063,7 @@ impl Default for Engine {
     }
 }
 
-impl Drop for Engine {
-    /// Rede de segurança para os caminhos que não passam por `shutdown` — uma exceção não
-    /// tratada no app, por exemplo. Não cobre `kill -9`: nesse caso o sistema solta o hog
-    /// sozinho, mas o sample rate fica trocado.
-    fn drop(&mut self) {
-        let mut inner = self.lock();
-        let _ = self.stop_and_release(&mut inner);
-    }
-}
+
 ```
 
 - [ ] **Step 4: Rodar os testes que não precisam de hardware**
@@ -1221,6 +1206,60 @@ cd rust && cargo test engine 2>&1 | tail -15
 ```
 
 Esperado: FALHA de compilação — `no method named play found`.
+
+- [ ] **Step 3b: Estender o `EngineInner` com o que só agora passa a ser usado**
+
+A Task 5 deixou a struct enxuta de propósito: campos escritos e nunca lidos viram aviso de
+`dead_code`. Agora eles passam a ter uso. Acrescente ao `EngineInner`:
+
+```rust
+    client: Option<AudioStreamBasicDescription>,
+    hogged: Option<HoggedDevice>,
+    playback: Option<Arc<Playback>>,
+    producer: Option<JoinHandle<()>>,
+    stop_producer: Arc<AtomicBool>,
+    volume: Option<VolumeRequest>,
+    ceiling: f64,
+    volume_outcome: Option<VolumeOutcome>,
+```
+
+e ao inicializador de `Engine::new`, na mesma ordem: `client: None`, `hogged: None`,
+`playback: None`, `producer: None`, `stop_producer: Arc::new(AtomicBool::new(false))`,
+`volume: None`, `ceiling: DEFAULT_CEILING`, `volume_outcome: None`.
+
+Acrescente também, no mesmo arquivo:
+
+```rust
+/// O mesmo padrão da CLI: sem `--volume` explícito, o device é baixado para no máximo isto.
+pub const DEFAULT_CEILING: f64 = 0.5;
+```
+
+e o método que a CLI usa para dizer o volume desejado antes de tocar:
+
+```rust
+    /// Define o volume aplicado quando o device for adquirido. `None` mantém o volume atual,
+    /// respeitando o teto.
+    pub fn set_requested_volume(&self, volume: Option<VolumeRequest>, ceiling: f64) {
+        let mut inner = self.lock();
+        inner.volume = volume;
+        inner.ceiling = ceiling;
+    }
+```
+
+E, ao final do arquivo, a rede de segurança que a Task 5 não pôde declarar porque
+`stop_and_release` ainda não existia:
+
+```rust
+impl Drop for Engine {
+    /// Rede de segurança para os caminhos que não passam por `shutdown` — uma exceção não
+    /// tratada no app, por exemplo. Não cobre `kill -9`: nesse caso o sistema solta o hog
+    /// sozinho, mas o sample rate fica trocado.
+    fn drop(&mut self) {
+        let mut inner = self.lock();
+        let _ = self.stop_and_release(&mut inner);
+    }
+}
+```
 
 - [ ] **Step 4: Implementar os comandos**
 
