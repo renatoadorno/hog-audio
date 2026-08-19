@@ -2249,31 +2249,32 @@ let package = Package(
     targets: [
         .target(name: "HogAudioFFI"),
         .target(name: "HogAudioBindings", dependencies: ["HogAudioFFI"]),
-        .target(name: "HogPlayerKit", dependencies: ["HogAudioBindings"]),
         .executableTarget(
             name: "HogPlayer",
-            dependencies: ["HogPlayerKit"],
+            dependencies: ["HogAudioBindings"],
             linkerSettings: linkRust
         ),
         .testTarget(
             name: "HogPlayerKitTests",
-            dependencies: ["HogPlayerKit"],
+            dependencies: ["HogAudioBindings"],
             linkerSettings: linkRust
         ),
     ]
 )
 ```
 
-- [ ] **Step 3: Criar um arquivo mínimo no `HogPlayerKit`**
+- [ ] **Step 3: Criar o executável mínimo**
 
-Um alvo Swift sem nenhum fonte não compila. Crie
-`apps/player/Sources/HogPlayerKit/Placeholder.swift`:
+O alvo executável precisa de um ponto de entrada. Crie
+`apps/player/Sources/HogPlayer/main.swift` com um provisório que a Task 13 substitui:
 
 ```swift
 import HogAudioBindings
 
-/// Reexporta o player para quem depende só do Kit.
-public typealias Player = HogPlayer
+// Provisório: a Task 13 troca isto pela janela SwiftUI. Serve para o alvo executável ter
+// ponto de entrada e para provar a linkagem fora do contexto de teste.
+let player = HogPlayer()
+print("estado inicial: \(player.snapshot().state)")
 ```
 
 - [ ] **Step 4: Escrever o teste da ponte**
@@ -2282,7 +2283,6 @@ Crie `apps/player/Tests/HogPlayerKitTests/BridgeTests.swift`:
 
 ```swift
 import Testing
-@testable import HogPlayerKit
 import HogAudioBindings
 
 @Test func playerNovoComecaEmIdle() {
@@ -2345,7 +2345,7 @@ test: cpp-test rust-test swift-test
 - [ ] **Step 8: Commit**
 
 ```bash
-git add apps/player/Package.swift apps/player/Sources/HogPlayerKit/Placeholder.swift \
+git add apps/player/Package.swift apps/player/Sources/HogPlayer/main.swift \
         apps/player/Tests Makefile
 git commit -m "feat(app): adicionar pacote swift linkando o engine rust"
 ```
@@ -2368,6 +2368,18 @@ Só o FLAC precisa do caminho alternativo, e é justamente o formato principal d
 
 **Files:**
 - Create: `apps/player/Sources/HogPlayerKit/Metadata.swift`, `apps/player/Tests/HogPlayerKitTests/MetadataTests.swift`
+- Modify: `apps/player/Package.swift`
+
+**Alvo novo:** a Task 9 deixou de propósito o `HogPlayerKit` fora do `Package.swift`, porque um
+alvo Swift sem fontes não compila e um arquivo só para preencher seria código morto. Agora que
+`Metadata.swift` existe, acrescente o alvo e mude a dependência do alvo de teste para ele:
+
+```swift
+        .target(name: "HogPlayerKit", dependencies: ["HogAudioBindings"]),
+```
+
+e no `.testTarget`, troque `dependencies: ["HogAudioBindings"]` por
+`dependencies: ["HogPlayerKit"]`.
 
 **Interfaces:**
 - Consumes: nada do Rust.
