@@ -6,7 +6,7 @@ FFI_DIR   := apps/player/Sources/HogAudioFFI
 BIND_DIR  := apps/player/Sources/HogAudioBindings
 APP_DIR   := apps/player/HogAudio.app
 
-.PHONY: all cpp cpp-test cpp-asan rust rust-test hw-test rust-lib bindings swift-test test verify verify-pause verify-volume info play app run-app clean
+.PHONY: all cpp cpp-test cpp-asan rust rust-test hw-test rust-lib bindings swift-test test icon verify verify-pause verify-volume info play app run-app clean
 
 all: cpp rust
 
@@ -109,10 +109,15 @@ play: cpp
 # ele nunca abre janela nem recebe foco de teclado.
 app: bindings
 	@cd apps/player && swift build -c release
-	@mkdir -p $(APP_DIR)/Contents/MacOS
+	@mkdir -p $(APP_DIR)/Contents/MacOS $(APP_DIR)/Contents/Resources
 	@cp apps/player/Resources/Info.plist $(APP_DIR)/Contents/Info.plist
+	@cp apps/player/Resources/AppIcon.icns $(APP_DIR)/Contents/Resources/
 	@cp apps/player/.build/release/HogPlayer $(APP_DIR)/Contents/MacOS/HogAudio
 	@echo "app montado em $(APP_DIR)"
+
+# O .icns e versionado; so rode isto depois de mexer no SVG. Precisa de rsvg-convert.
+icon:
+	@./tools/make_icon.sh
 
 # make run-app FILE=musicas/faixa.flac
 run-app: app

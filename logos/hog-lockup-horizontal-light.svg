@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 520 120" width="520" height="120" role="img" aria-label="Hog Music">
+  <g transform="translate(0 26) scale(0.6)">
+    <g fill="none" stroke="#8A4E18" stroke-width="11" stroke-linecap="butt" stroke-linejoin="miter">
+    <path d="M6 22 H34 V60 H86 V98 H114"></path>
+    <path d="M34 60 V104"></path>
+    <path d="M86 60 V16"></path>
+  </g>
+  </g>
+  <text x="92" y="58" font-family="Archivo, 'Helvetica Neue', Arial, sans-serif" font-weight="800" font-size="44" letter-spacing="-1.5" fill="#2B1A0C">Hog Music</text>
+  <text x="94" y="80" font-family="'JetBrains Mono', 'SF Mono', monospace" font-size="13" letter-spacing="1.9" fill="#6B5F55">BIT-PERFECT · RUST</text>
+</svg>

@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 260 200" width="260" height="200" role="img" aria-label="Hog Music">
+  <g transform="translate(70 4) scale(1)">
+    <g fill="none" stroke="#E08A3C" stroke-width="11" stroke-linecap="butt" stroke-linejoin="miter">
+    <path d="M6 22 H34 V60 H86 V98 H114"></path>
+    <path d="M34 60 V104"></path>
+    <path d="M86 60 V16"></path>
+  </g>
+  </g>
+  <text x="130" y="172" text-anchor="middle" font-family="Archivo, 'Helvetica Neue', Arial, sans-serif" font-weight="800" font-size="40" letter-spacing="-1.3" fill="#FFFFFF">Hog Music</text>
+</svg>

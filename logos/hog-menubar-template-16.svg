@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" width="16" height="16" role="img" aria-label="Hog Music">
+  <g fill="none" stroke="#000000" stroke-width="17" stroke-linecap="butt" stroke-linejoin="miter">
+    <path d="M22 18 V102"></path>
+    <path d="M98 18 V102"></path>
+    <path d="M22 60 H98"></path>
+  </g>
+</svg>

@@ -19,3 +19,5 @@ apps/player/HogAudio.app/
 *.m4a
 *.mp3
 *.caf
+
+prompts/
