@@ -298,12 +298,13 @@ impl Engine {
     }
 
     fn start_common(&self, inner: &mut EngineInner, attach_io_proc: bool) -> Result<(), String> {
-        // Incondicional, mesmo vindo de Loaded (onde nada está retido — vira no-op). De
-        // Finished ou Paused-sem-resume-possível, um HoggedDevice antigo pode continuar
-        // registrado: criar um segundo aqui sobreporia hog/rate/formato por cima do que a
-        // acquire() nova ainda vai gravar como "original", e o Drop do antigo revogaria hog
-        // mode e reverteria rate/formato por baixo de uma sessão que se acredita exclusiva —
-        // tudo retornando noErr, sem nenhum sinal de erro.
+        // Incondicional, mesmo vindo de Loaded (onde nada está retido — vira no-op). O match
+        // de `play()` só chega aqui a partir de Loaded ou Finished; vindo de Finished um
+        // HoggedDevice antigo pode continuar registrado (o fim da faixa só chama
+        // `hogged.stop()`, não solta o device) — criar um segundo aqui sobreporia
+        // hog/rate/formato por cima do que a acquire() nova ainda vai gravar como "original",
+        // e o Drop do antigo revogaria hog mode e reverteria rate/formato por baixo de uma
+        // sessão que se acredita exclusiva — tudo retornando noErr, sem nenhum sinal de erro.
         let _ = self.stop_and_release(inner);
 
         // Recarrega do início: vindo de Finished o decodificador já se esgotou, e mesmo
@@ -796,6 +797,20 @@ mod tests {
     #[test]
     #[ignore = "precisa de um device de saída real; toma o device por alguns segundos"]
     fn tocar_de_novo_apos_o_fim_nao_duplica_a_posse_do_device() {
+        // Verificação estrutural, não de fumaça: sob o defeito antigo, o Drop do
+        // HoggedDevice velho reverte hog mode e sample rate por baixo da sessão nova, e toda
+        // chamada envolvida retorna noErr — estado do engine (Playing, tempo avançando,
+        // shutdown sem erro) continuaria parecendo saudável mesmo corrompido. Só a leitura
+        // direta do hardware denuncia; por isso as duas asserções finais leem
+        // kAudioDevicePropertyHogMode e kAudioDevicePropertyNominalSampleRate no meio da
+        // segunda reprodução, antes do shutdown (que solta o device de propósito e apagaria o
+        // sintoma).
+        use crate::ffi::{get_property, property_address};
+        use coreaudio_sys::{
+            kAudioDevicePropertyHogMode, kAudioDevicePropertyNominalSampleRate,
+            kAudioObjectPropertyScopeGlobal, pid_t,
+        };
+
         let path = "../testdata/t44_16.flac";
         if !std::path::Path::new(path).exists() {
             eprintln!("pulando: {path} não existe (gere com ffmpeg)");
@@ -833,6 +848,35 @@ mod tests {
         assert!(
             engine.status().elapsed_seconds() > 0.0,
             "o tempo decorrido deveria avançar na segunda reprodução"
+        );
+
+        let device_id = engine
+            .lock()
+            .device
+            .as_ref()
+            .expect("device deveria estar consultado")
+            .id;
+
+        // Fato 1: o dono do hog mode é este processo. Se o Drop do HoggedDevice antigo
+        // tivesse liberado o hog por baixo da sessão nova, isto leria outro dono (ou nenhum).
+        let hog_address = property_address(kAudioDevicePropertyHogMode, kAudioObjectPropertyScopeGlobal);
+        let owner: pid_t =
+            get_property(device_id, &hog_address).expect("deveria ler o dono do hog mode");
+        assert_eq!(
+            owner,
+            std::process::id() as pid_t,
+            "o hog mode deveria pertencer a este processo depois da segunda reprodução; um              dono diferente denuncia o Drop do HoggedDevice antigo liberando por baixo da              sessão nova"
+        );
+
+        // Fato 2: o sample rate do device é o da faixa (44100 Hz). Se o Drop antigo tivesse
+        // revertido o rate, isto leria o valor pré-hog em vez do negociado.
+        let rate_address =
+            property_address(kAudioDevicePropertyNominalSampleRate, kAudioObjectPropertyScopeGlobal);
+        let rate: f64 =
+            get_property(device_id, &rate_address).expect("deveria ler o sample rate nominal");
+        assert!(
+            (rate - 44100.0).abs() < 0.5,
+            "o sample rate deveria continuar em 44100 Hz (o negociado) durante a segunda              reprodução; {rate} Hz denunciaria o Drop do HoggedDevice antigo revertendo para              a taxa pré-hog"
         );
 
         engine.shutdown().expect("deveria restaurar o device depois da segunda reprodução");
