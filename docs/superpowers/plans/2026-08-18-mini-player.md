@@ -822,7 +822,7 @@ prova que a mexida não alterou byte nenhum.
 
 ```bash
 git add rust/src/playback.rs rust/src/lib.rs rust/src/main.rs
-git commit -m "refactor(playback): mover ioproc para a biblioteca e contar frames entregues"
+git commit -m "refactor(playback): mover ioproc para biblioteca e contar frames"
 ```
 
 ---
@@ -1718,7 +1718,7 @@ código 130 (`echo $?`) e restaura o device.
 
 ```bash
 git add rust/src/device.rs rust/src/engine.rs rust/src/main.rs
-git commit -m "feat(engine): adicionar play, pause, volume e encerramento; cli sobre o engine"
+git commit -m "feat(engine): adicionar play, pause, volume e encerramento"
 ```
 
 ---
@@ -3049,7 +3049,7 @@ Esperado: todos os testes das Tasks 9 a 12 passando.
 ```bash
 git add apps/player/Sources/HogPlayerKit/PlayerViewModel.swift \
         apps/player/Tests/HogPlayerKitTests/ViewModelTests.swift
-git commit -m "feat(app): adicionar viewmodel com poll e comandos fora da thread principal"
+git commit -m "feat(app): adicionar viewmodel com poll e comandos assincronos"
 ```
 
 ---
