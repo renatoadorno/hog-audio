@@ -51,6 +51,7 @@ verify-pause: rust
 	@./$(RUST_BIN) --dump /tmp/hog_sem_pausa.raw "$(FILE)" >/dev/null
 	@./$(RUST_BIN) --dump /tmp/hog_com_pausa.raw --pause-at 100000 "$(FILE)" >/dev/null
 	@test -s /tmp/hog_sem_pausa.raw || { echo "FALHOU: dump vazio"; exit 1; }
+	@test -s /tmp/hog_com_pausa.raw || { echo "FALHOU: dump vazio"; exit 1; }
 	@cmp /tmp/hog_sem_pausa.raw /tmp/hog_com_pausa.raw \
 	  && echo "pause: fluxo identico com e sem pausa"
 
@@ -62,6 +63,7 @@ verify-volume: rust
 	@./$(RUST_BIN) --dump /tmp/hog_vol20.raw --volume 20 "$(FILE)" >/dev/null
 	@./$(RUST_BIN) --dump /tmp/hog_vol90.raw --volume 90 "$(FILE)" >/dev/null
 	@test -s /tmp/hog_vol20.raw || { echo "FALHOU: dump vazio"; exit 1; }
+	@test -s /tmp/hog_vol90.raw || { echo "FALHOU: dump vazio"; exit 1; }
 	@cmp /tmp/hog_vol20.raw /tmp/hog_vol90.raw \
 	  && echo "volume: amostras identicas a 20% e 90%"
 

@@ -343,7 +343,7 @@ fn run_dump(
     let block_bytes = DUMP_BLOCK_FRAMES * client.mBytesPerFrame as usize;
     let mut block = vec![0u8; block_bytes];
     let mut frames_written: u64 = 0;
-    let mut ja_pausou = false;
+    let mut already_paused = false;
 
     loop {
         let take = aligned_read_size(
@@ -362,9 +362,9 @@ fn run_dump(
             // chamado por um tempo. O ring buffer não é tocado, a produtora enche e bloqueia, e
             // ao voltar a leitura continua no byte seguinte. Se algum dia a pausa passar a
             // descartar ou reiniciar o buffer, a saída deixa de bater e este teste reprova.
-            if let Some(limite) = pause_at {
-                if !ja_pausou && frames_written >= limite as u64 {
-                    ja_pausou = true;
+            if let Some(limit) = pause_at {
+                if !already_paused && frames_written >= limit as u64 {
+                    already_paused = true;
                     std::thread::sleep(std::time::Duration::from_millis(400));
                 }
             }
