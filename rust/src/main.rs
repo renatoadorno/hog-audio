@@ -141,7 +141,8 @@ fn usage() -> i32 {
          \x20 --info          mostra o que seria negociado, sem tocar no device\n\
          \x20 --volume V      volume da reprodução: 35, 35% ou -18dB\n\
          \x20 --max-volume V  teto aplicado quando --volume é omitido (padrão 50%)\n\
-         \x20 --dump ARQUIVO  grava em disco os bytes que iriam ao DAC, sem tocar\n\n\
+         \x20 --dump ARQUIVO  grava em disco os bytes que iriam ao DAC, sem tocar\n\
+         \x20 --pause-at N    no modo dump, simula uma pausa depois de N frames\n\n\
          \x20 O volume é ajustado depois de tomar o device e antes de sair som, e é\n\
          \x20 devolvido ao valor anterior ao terminar.\n"
     );
@@ -154,6 +155,7 @@ struct Options {
     volume: Option<VolumeRequest>,
     ceiling: f64,
     dump: Option<String>,
+    pause_at: Option<usize>,
 }
 
 fn parse_args() -> Result<Options, i32> {
@@ -164,6 +166,7 @@ fn parse_args() -> Result<Options, i32> {
         volume: None,
         ceiling: DEFAULT_CEILING,
         dump: None,
+        pause_at: None,
     };
 
     let mut i = 0;
@@ -179,6 +182,20 @@ fn parse_args() -> Result<Options, i32> {
                     return Err(2);
                 };
                 options.dump = Some(value.clone());
+            }
+            "--pause-at" => {
+                i += 1;
+                let Some(value) = args.get(i) else {
+                    eprintln!("erro: --pause-at exige um número de frames");
+                    return Err(2);
+                };
+                match value.parse::<usize>() {
+                    Ok(frames) => options.pause_at = Some(frames),
+                    Err(_) => {
+                        eprintln!("erro: --pause-at espera um número inteiro de frames");
+                        return Err(2);
+                    }
+                }
             }
             "--volume" | "--max-volume" => {
                 i += 1;
@@ -246,7 +263,13 @@ fn run() -> i32 {
     }
 
     if let Some(path) = options.dump.as_ref() {
-        return run_dump(&engine, path, options.volume.is_some(), options.ceiling);
+        return run_dump(
+            &engine,
+            path,
+            options.volume.is_some(),
+            options.ceiling,
+            options.pause_at,
+        );
     }
 
     if let Err(error) = engine.play() {
@@ -289,7 +312,13 @@ fn run() -> i32 {
 /// Consome o ring exatamente como o IOProc faria, mas grava em disco. O pipeline é o mesmo —
 /// decodificador, ring buffer, alinhamento de frame — porque um atalho que apenas
 /// decodificasse pularia justamente as partes onde estiveram os bugs mais caros.
-fn run_dump(engine: &Engine, path: &str, explicit_request: bool, ceiling: f64) -> i32 {
+fn run_dump(
+    engine: &Engine,
+    path: &str,
+    explicit_request: bool,
+    ceiling: f64,
+    pause_at: Option<usize>,
+) -> i32 {
     let (playback, client) = match engine.start_offline() {
         Ok(pair) => pair,
         Err(error) => {
@@ -314,6 +343,7 @@ fn run_dump(engine: &Engine, path: &str, explicit_request: bool, ceiling: f64) -
     let block_bytes = DUMP_BLOCK_FRAMES * client.mBytesPerFrame as usize;
     let mut block = vec![0u8; block_bytes];
     let mut frames_written: u64 = 0;
+    let mut ja_pausou = false;
 
     loop {
         let take = aligned_read_size(
@@ -328,6 +358,16 @@ fn run_dump(engine: &Engine, path: &str, explicit_request: bool, ceiling: f64) -
                 return 1;
             }
             frames_written += got as u64 / client.mBytesPerFrame as u64;
+            // Reproduz o que o pause de verdade faz: o consumidor simplesmente deixa de ser
+            // chamado por um tempo. O ring buffer não é tocado, a produtora enche e bloqueia, e
+            // ao voltar a leitura continua no byte seguinte. Se algum dia a pausa passar a
+            // descartar ou reiniciar o buffer, a saída deixa de bater e este teste reprova.
+            if let Some(limite) = pause_at {
+                if !ja_pausou && frames_written >= limite as u64 {
+                    ja_pausou = true;
+                    std::thread::sleep(std::time::Duration::from_millis(400));
+                }
+            }
             continue;
         }
         if playback.producer_done.load(Ordering::Acquire) || interrupted() {

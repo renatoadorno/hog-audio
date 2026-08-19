@@ -2,7 +2,7 @@
 CPP_BUILD := cpp/build
 RUST_BIN  := rust/target/release/hog-audio
 
-.PHONY: all cpp cpp-test cpp-asan rust rust-test test verify info play clean
+.PHONY: all cpp cpp-test cpp-asan rust rust-test test verify verify-pause verify-volume info play clean
 
 all: cpp rust
 
@@ -42,6 +42,28 @@ verify: all
 	@python3 tools/verify_bitperfect.py /tmp/hog_ref.raw /tmp/hog_rust.raw --bits $(BITS)
 	@echo "--- C++ contra Rust ---"
 	@cmp /tmp/hog_cpp.raw /tmp/hog_rust.raw && echo "dumps identicos"
+
+# make verify-pause FILE=testdata/t96_24.flac
+# O pause nao pode descartar nem duplicar bytes do ring buffer: o dump com uma pausa
+# injetada no meio tem de sair identico ao dump sem pausa.
+verify-pause: rust
+	@test -n "$(FILE)" || { echo "uso: make verify-pause FILE=arquivo.flac"; exit 2; }
+	@./$(RUST_BIN) --dump /tmp/hog_sem_pausa.raw "$(FILE)" >/dev/null
+	@./$(RUST_BIN) --dump /tmp/hog_com_pausa.raw --pause-at 100000 "$(FILE)" >/dev/null
+	@test -s /tmp/hog_sem_pausa.raw || { echo "FALHOU: dump vazio"; exit 1; }
+	@cmp /tmp/hog_sem_pausa.raw /tmp/hog_com_pausa.raw \
+	  && echo "pause: fluxo identico com e sem pausa"
+
+# make verify-volume FILE=testdata/t96_24.flac
+# O volume e aplicado no device, nunca nas amostras. O modo dump adquire o device e aplica
+# o volume de verdade, entao este teste reprova se alguem implementar ganho em software.
+verify-volume: rust
+	@test -n "$(FILE)" || { echo "uso: make verify-volume FILE=arquivo.flac"; exit 2; }
+	@./$(RUST_BIN) --dump /tmp/hog_vol20.raw --volume 20 "$(FILE)" >/dev/null
+	@./$(RUST_BIN) --dump /tmp/hog_vol90.raw --volume 90 "$(FILE)" >/dev/null
+	@test -s /tmp/hog_vol20.raw || { echo "FALHOU: dump vazio"; exit 1; }
+	@cmp /tmp/hog_vol20.raw /tmp/hog_vol90.raw \
+	  && echo "volume: amostras identicas a 20% e 90%"
 
 # make info FILE=musicas/faixa.flac — mostra o que seria negociado, sem tocar no device.
 info: cpp
