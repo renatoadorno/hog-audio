@@ -81,6 +81,18 @@ private func snap(_ state: PlayerState, elapsed: Double = 0, underruns: UInt64 =
     #expect(d.technicalLine.contains("3 underruns"))
 }
 
+@Test func taxaDeAmostragemDerivadaDeCdMostraACasaDecimal() {
+    // 44,1/88,2/176,4 kHz são a família derivada de CD e cobrem a maior parte dos FLAC reais.
+    // 96000 (a fixture `faixa`) é múltiplo redondo de 1000 e mascara truncamento — por isso
+    // este caso precisa de uma taxa própria.
+    let cd = TrackFormat(
+        sampleRate: 44100, bitDepth: 16, channels: 2,
+        codec: "flac", deviceName: "Fones de Ouvido Externos", totalSeconds: 208.7
+    )
+    let d = displayState(snapshot: snap(.playing), metadata: tags, format: cd)
+    #expect(d.technicalLine.contains("44.1 kHz"))
+}
+
 @Test func aFaixaTerminadaPodeSerTocadaDeNovo() {
     let d = displayState(snapshot: snap(.finished, elapsed: 208.7), metadata: tags, format: faixa)
     #expect(d.canPlay)

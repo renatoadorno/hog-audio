@@ -1,7 +1,9 @@
 import Foundation
 import HogAudioBindings
 
-public struct DisplayState: Equatable {
+/// O que a tela mostra — distinto de `Snapshot`, que é o estado do engine. `Snapshot` fala a
+/// língua do motor de áudio; `DisplayState` já vem traduzido para o que a interface renderiza.
+public struct DisplayState: Equatable, Sendable {
     public let title: String
     public let artist: String
     public let album: String
@@ -13,6 +15,18 @@ public struct DisplayState: Equatable {
     public let canPause: Bool
     public let isPlaying: Bool
     public let technicalLine: String
+}
+
+/// A família 44,1/88,2/176,4 kHz (derivada de CD) tem casa decimal real; 48/96/192 são
+/// múltiplos redondos de 1000 e não têm. Suprimir a casa quando ela é zero evita "96.0 kHz"
+/// sem esconder "44.1 kHz" atrás de um arredondamento que mostraria "44 kHz" — informação
+/// errada num projeto que existe para ser transparente sobre o que chega ao DAC.
+private func formatSampleRate(_ hz: Double) -> String {
+    let khz = hz / 1000
+    if khz.truncatingRemainder(dividingBy: 1) == 0 {
+        return String(format: "%.0f kHz", khz)
+    }
+    return String(format: "%.1f kHz", khz)
 }
 
 /// Traduz o estado do engine para o que a tela mostra. É função pura de propósito: a interface
@@ -31,7 +45,7 @@ public func displayState(
     var tecnica = ""
     if let format {
         var partes = [
-            String(format: "%.0f kHz", format.sampleRate / 1000),
+            formatSampleRate(format.sampleRate),
             "\(format.bitDepth) bit",
             format.codec,
         ]
