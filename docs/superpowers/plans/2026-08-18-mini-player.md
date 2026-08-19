@@ -966,7 +966,6 @@ struct EngineInner {
     stop_producer: Arc<AtomicBool>,
     volume: Option<VolumeRequest>,
     ceiling: f64,
-    volume_outcome: Option<VolumeOutcome>,
 }
 
 /// O mesmo padrão da CLI: sem `--volume` explícito, o device é baixado para no máximo isto.
@@ -989,7 +988,6 @@ impl Engine {
                 stop_producer: Arc::new(AtomicBool::new(false)),
                 volume: None,
                 ceiling: DEFAULT_CEILING,
-                volume_outcome: None,
             }),
         }
     }
@@ -1521,7 +1519,9 @@ pub struct VolumeOutcome {
 `pub(crate) fn apply_volume(hogged: &mut HoggedDevice, device: &OutputDevice, request:
 Option<&VolumeRequest>, ceiling: f64) -> Result<VolumeOutcome, String>`, com a **mesma lógica de
 decisão de hoje** — pedido explícito vence; sem pedido, o teto só age quando o volume atual o
-ultrapassa. Guarde o resultado em `inner.volume_outcome: Option<VolumeOutcome>` e exponha
+ultrapassa. **Acrescente agora** o campo `volume_outcome: Option<VolumeOutcome>` ao
+`EngineInner` e ao seu inicializador — ele não existe desde a Task 5 de propósito, porque o tipo
+só nasce aqui. Guarde nele o resultado e exponha
 `pub fn volume_outcome(&self) -> Option<VolumeOutcome>` clonando os campos, para a CLI imprimir.
 
 ```rust
