@@ -3,6 +3,7 @@
 //! biblioteca; nenhuma das duas fala com o Core Audio diretamente.
 
 pub mod device;
+pub mod engine;
 pub mod ffi;
 pub mod format;
 pub mod playback;
