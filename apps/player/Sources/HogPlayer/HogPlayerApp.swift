@@ -4,19 +4,17 @@ import SwiftUI
 
 @main
 struct HogPlayerApp: App {
-    @StateObject private var model = PlayerViewModel()
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
 
     var body: some Scene {
         Window("hog-audio", id: "player") {
-            ContentView(model: model)
+            ContentView(model: delegate.model)
                 .onAppear {
-                    delegate.model = model
-                    model.startPolling()
+                    delegate.model.startPolling()
                     // Argumento de linha de comando: é o que permite iterar rápido durante o
                     // desenvolvimento sem passar pelo painel de abrir arquivo.
-                    if let caminho = CommandLine.arguments.dropFirst().first {
-                        model.open(url: URL(fileURLWithPath: caminho))
+                    if let path = CommandLine.arguments.dropFirst().first {
+                        delegate.model.open(url: URL(fileURLWithPath: path))
                     }
                 }
         }
@@ -24,8 +22,11 @@ struct HogPlayerApp: App {
     }
 }
 
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    @MainActor var model: PlayerViewModel?
+    // Criado junto com o delegate, antes de qualquer cena existir: não há instante em que o
+    // encerramento do processo encontre o modelo nulo.
+    let model = PlayerViewModel()
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         true
@@ -33,6 +34,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         // Sem isto o device fica travado no rate e no formato da última faixa.
-        MainActor.assumeIsolated { model?.shutdown() }
+        model.shutdown()
     }
 }

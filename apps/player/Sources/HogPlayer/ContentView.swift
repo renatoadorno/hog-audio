@@ -5,25 +5,26 @@ import UniformTypeIdentifiers
 
 struct ContentView: View {
     @ObservedObject var model: PlayerViewModel
+    @State private var dropError: String?
 
     var body: some View {
         VStack(spacing: 14) {
-            capa
-            informacoes
-            relogio
-            controles
+            coverArt
+            trackInfo
+            clock
+            controls
             volume
-            rodape
+            footer
         }
         .padding(18)
         .frame(width: 360, height: 480)
-        .onDrop(of: [.fileURL], isTargeted: nil, perform: receberArquivo)
+        .onDrop(of: [.fileURL], isTargeted: nil, perform: handleDrop)
     }
 
-    private var capa: some View {
+    private var coverArt: some View {
         Group {
-            if let dados = model.display.artwork, let imagem = NSImage(data: dados) {
-                Image(nsImage: imagem).resizable().aspectRatio(contentMode: .fit)
+            if let data = model.display.artwork, let image = NSImage(data: data) {
+                Image(nsImage: image).resizable().aspectRatio(contentMode: .fit)
             } else {
                 RoundedRectangle(cornerRadius: 6)
                     .fill(Color.secondary.opacity(0.15))
@@ -35,7 +36,7 @@ struct ContentView: View {
         .clipShape(RoundedRectangle(cornerRadius: 6))
     }
 
-    private var informacoes: some View {
+    private var trackInfo: some View {
         VStack(spacing: 3) {
             Text(model.display.title).font(.headline).lineLimit(1)
             Text(model.display.artist).font(.subheadline)
@@ -45,7 +46,7 @@ struct ContentView: View {
         }
     }
 
-    private var relogio: some View {
+    private var clock: some View {
         VStack(spacing: 4) {
             ProgressView(value: model.display.progress)
             HStack {
@@ -58,9 +59,9 @@ struct ContentView: View {
         }
     }
 
-    private var controles: some View {
+    private var controls: some View {
         HStack(spacing: 20) {
-            Button("Abrir…", action: escolherArquivo)
+            Button("Abrir…", action: chooseFile)
             Button(action: model.toggle) {
                 Image(systemName: model.display.isPlaying ? "pause.fill" : "play.fill")
                     .font(.title)
@@ -84,34 +85,46 @@ struct ContentView: View {
         }
     }
 
-    private var rodape: some View {
+    private var footer: some View {
         VStack(spacing: 4) {
             Text(model.display.technicalLine)
                 .font(.caption2.monospaced())
                 .foregroundStyle(.secondary)
-            if let erro = model.errorMessage {
-                Text(erro).font(.caption2).foregroundStyle(.red)
+            // `dropError` cobre a falha do NSItemProvider, que nunca chega a `model.open` —
+            // `model.errorMessage` tem setter privado em HogPlayerKit e não pode ser escrito
+            // daqui, então a falha do drop precisa do próprio estado local para não morrer muda.
+            if let message = model.errorMessage ?? dropError {
+                Text(message).font(.caption2).foregroundStyle(.red)
                     .lineLimit(3).multilineTextAlignment(.center)
             }
         }
         .frame(height: 48)
     }
 
-    private func escolherArquivo() {
-        let painel = NSOpenPanel()
-        painel.allowsMultipleSelection = false
-        painel.canChooseDirectories = false
-        painel.allowedContentTypes = [.audio]
-        if painel.runModal() == .OK, let url = painel.url {
+    private func chooseFile() {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.allowedContentTypes = [.audio]
+        if panel.runModal() == .OK, let url = panel.url {
             model.open(url: url)
         }
     }
 
-    private func receberArquivo(_ provedores: [NSItemProvider]) -> Bool {
-        guard let provedor = provedores.first else { return false }
-        _ = provedor.loadObject(ofClass: URL.self) { url, _ in
-            guard let url else { return }
-            Task { @MainActor in model.open(url: url) }
+    private func handleDrop(_ providers: [NSItemProvider]) -> Bool {
+        guard let provider = providers.first else { return false }
+        _ = provider.loadObject(ofClass: URL.self) { url, error in
+            // Convertido para `String` ainda fora da task: `Error` não é `Sendable` e não pode
+            // atravessar para uma closure isolada à main actor sob concorrência estrita.
+            let failureReason = error.map(String.init(describing:))
+            Task { @MainActor in
+                guard let url else {
+                    dropError = failureReason ?? "não foi possível ler o arquivo arrastado"
+                    return
+                }
+                dropError = nil
+                model.open(url: url)
+            }
         }
         return true
     }
