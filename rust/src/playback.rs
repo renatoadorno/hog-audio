@@ -215,9 +215,8 @@ mod tests {
     }
 
     #[test]
-    fn ramo_intercalado_entrega_bytes_do_ring_e_conta_frames_pedidos() {
+    fn ramo_intercalado_entrega_bytes_do_ring_na_ordem_certa() {
         let status = Arc::new(SharedStatus::new());
-        status.set_track(1_000, 100.0);
         let client = client_format(4, 2);
         let playback = Playback::new(64, &client, false, Arc::clone(&status));
 
@@ -229,13 +228,12 @@ mod tests {
         call_io_proc(&playback, list.as_mut_ptr());
 
         assert_eq!(out, pattern);
-        // 8 frames pedidos a 100 Hz: o decorrido segue o que foi pedido, não o que foi lido.
-        assert!((status.elapsed_seconds() - 0.08).abs() < 1e-9);
     }
 
     #[test]
     fn ramo_intercalado_preenche_silencio_no_underrun_e_conta_a_falha() {
         let status = Arc::new(SharedStatus::new());
+        status.set_track(1_000, 100.0);
         let client = client_format(4, 2);
         let playback = Playback::new(64, &client, false, Arc::clone(&status));
 
@@ -251,6 +249,9 @@ mod tests {
         assert!(out[8..].iter().all(|&b| b == 0));
         assert_eq!(status.underruns(), 1);
         assert!(!playback.finished.load(Ordering::Acquire));
+        // need (8 frames pedidos) != got (2 frames lidos) de propósito: só assim a contagem
+        // provar que segue o pedido, e não o lido, tem como reprovar sob mutação.
+        assert!((status.elapsed_seconds() - 0.08).abs() < 1e-9);
     }
 
     #[test]
@@ -273,40 +274,90 @@ mod tests {
     #[test]
     fn ramo_nao_intercalado_desintercala_lr_para_buffers_separados() {
         let status = Arc::new(SharedStatus::new());
-        let client = client_format(2, 2); // 1 byte por amostra, só para simplificar a aritmética
+        // 2 bytes por amostra, de propósito: com largura 1 o offset `ch * sample` é igual a
+        // `ch`, e um bug que esquecesse de multiplicar pela largura passaria despercebido.
+        let client = client_format(4, 2);
         let playback = Playback::new(64, &client, true, Arc::clone(&status));
 
-        // LRLRLR..., 4 frames: L = 10,11,12,13 / R = 20,21,22,23
-        let interleaved = [10u8, 20, 11, 21, 12, 22, 13, 23];
+        // LRLRLR..., 3 frames de 2 bytes por canal; os dois bytes de cada amostra são
+        // diferentes entre si, para que inverter a ordem deles também reprove o teste.
+        let interleaved = [
+            0x10, 0x11, 0x20, 0x21, // frame 0: L, R
+            0x12, 0x13, 0x22, 0x23, // frame 1: L, R
+            0x14, 0x15, 0x24, 0x25, // frame 2: L, R
+        ];
         assert_eq!(playback.ring.write(&interleaved), interleaved.len());
 
-        let mut left = vec![0xFFu8; 4];
-        let mut right = vec![0xFFu8; 4];
+        let mut left = vec![0xFFu8; 6];
+        let mut right = vec![0xFFu8; 6];
         let mut list = SyntheticBufferList::new(&[buffer(&mut left), buffer(&mut right)]);
         call_io_proc(&playback, list.as_mut_ptr());
 
-        assert_eq!(left, vec![10, 11, 12, 13]);
-        assert_eq!(right, vec![20, 21, 22, 23]);
+        assert_eq!(left, vec![0x10, 0x11, 0x12, 0x13, 0x14, 0x15]);
+        assert_eq!(right, vec![0x20, 0x21, 0x22, 0x23, 0x24, 0x25]);
     }
 
     #[test]
     fn ramo_nao_intercalado_zera_buffers_alem_dos_canais_existentes() {
         let status = Arc::new(SharedStatus::new());
-        let client = client_format(2, 2); // 2 canais
+        let client = client_format(4, 2); // 2 canais, 2 bytes por amostra
         let playback = Playback::new(64, &client, true, Arc::clone(&status));
 
-        let interleaved = [10u8, 20, 11, 21, 12, 22, 13, 23];
+        let interleaved = [
+            0x10, 0x11, 0x20, 0x21, 0x12, 0x13, 0x22, 0x23, 0x14, 0x15, 0x24, 0x25,
+        ];
         assert_eq!(playback.ring.write(&interleaved), interleaved.len());
 
-        let mut left = vec![0xFFu8; 4];
-        let mut right = vec![0xFFu8; 4];
-        let mut extra = vec![0xEEu8; 4]; // device pediu 3 buffers, só há 2 canais
+        let mut left = vec![0xFFu8; 6];
+        let mut right = vec![0xFFu8; 6];
+        let mut extra = vec![0xEEu8; 6]; // device pediu 3 buffers, só há 2 canais
         let mut list =
             SyntheticBufferList::new(&[buffer(&mut left), buffer(&mut right), buffer(&mut extra)]);
         call_io_proc(&playback, list.as_mut_ptr());
 
-        assert_eq!(left, vec![10, 11, 12, 13]);
-        assert_eq!(right, vec![20, 21, 22, 23]);
-        assert_eq!(extra, vec![0, 0, 0, 0]);
+        assert_eq!(left, vec![0x10, 0x11, 0x12, 0x13, 0x14, 0x15]);
+        assert_eq!(right, vec![0x20, 0x21, 0x22, 0x23, 0x24, 0x25]);
+        assert_eq!(extra, vec![0, 0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn ramo_nao_intercalado_preenche_silencio_no_underrun_e_conta_a_falha() {
+        let status = Arc::new(SharedStatus::new());
+        let client = client_format(4, 2);
+        let playback = Playback::new(64, &client, true, Arc::clone(&status));
+
+        // só 2 dos 4 frames que o device vai pedir estão disponíveis no ring
+        let interleaved = [0x10, 0x11, 0x20, 0x21, 0x12, 0x13, 0x22, 0x23];
+        assert_eq!(playback.ring.write(&interleaved), interleaved.len());
+
+        // Sentinela não-zero: distingue "escreveu silêncio" de "não escreveu nada".
+        let mut left = vec![0xFFu8; 8]; // device pede 4 frames
+        let mut right = vec![0xFFu8; 8];
+        let mut list = SyntheticBufferList::new(&[buffer(&mut left), buffer(&mut right)]);
+        call_io_proc(&playback, list.as_mut_ptr());
+
+        assert_eq!(left, vec![0x10, 0x11, 0x12, 0x13, 0, 0, 0, 0]);
+        assert_eq!(right, vec![0x20, 0x21, 0x22, 0x23, 0, 0, 0, 0]);
+        assert_eq!(status.underruns(), 1);
+        assert!(!playback.finished.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn ramo_nao_intercalado_marca_fim_sem_contar_underrun_quando_produtora_terminou() {
+        let status = Arc::new(SharedStatus::new());
+        let client = client_format(4, 2);
+        let playback = Playback::new(64, &client, true, Arc::clone(&status));
+        playback.producer_done.store(true, Ordering::Release);
+        // ring vazio de propósito: é o fim real da faixa, não uma falha de alimentação
+
+        let mut left = vec![0xFFu8; 4]; // device pede 2 frames
+        let mut right = vec![0xFFu8; 4];
+        let mut list = SyntheticBufferList::new(&[buffer(&mut left), buffer(&mut right)]);
+        call_io_proc(&playback, list.as_mut_ptr());
+
+        assert!(left.iter().all(|&b| b == 0));
+        assert!(right.iter().all(|&b| b == 0));
+        assert!(playback.finished.load(Ordering::Acquire));
+        assert_eq!(status.underruns(), 0);
     }
 }
