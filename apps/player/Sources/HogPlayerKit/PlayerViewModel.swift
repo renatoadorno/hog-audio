@@ -1,9 +1,12 @@
 import Foundation
 import HogAudioBindings
+import os
 
 // O protocolo que o ViewModel consome é o `HogPlayerProtocol` **gerado pelo uniffi** — ele já
 // declara exatamente os seis métodos e já é `Sendable`. Escrever um protocolo próprio aqui
 // duplicaria a fronteira e sairia de sincronia no dia em que a API do Rust mudasse.
+
+private let logger = Logger(subsystem: "local.hogaudio.player", category: "PlayerViewModel")
 
 @MainActor
 public final class PlayerViewModel: ObservableObject {
@@ -21,6 +24,10 @@ public final class PlayerViewModel: ObservableObject {
     private var format: TrackFormat?
     private var timer: Timer?
 
+    /// Incrementado a cada `open()`: a task de metadados de uma abertura mais antiga que
+    /// aterrissa depois de uma mais nova não pode sobrescrever o que já está na tela.
+    private var openGeneration = 0
+
     public init(player: any HogPlayerProtocol) {
         self.player = player
         self.display = displayState(
@@ -33,6 +40,9 @@ public final class PlayerViewModel: ObservableObject {
     }
 
     public func startPolling() {
+        // Sem isto, um segundo `onAppear` vazaria o timer anterior — o run loop o retém, e
+        // a taxa de poll dobraria para sempre.
+        stopPolling()
         // Dez vezes por segundo: suficiente para o relógio parecer contínuo, e barato porque
         // o snapshot só lê atômicos do lado Rust.
         timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
@@ -62,20 +72,35 @@ public final class PlayerViewModel: ObservableObject {
 
     public func open(url: URL) {
         errorMessage = nil
+        openGeneration += 1
+        let generation = openGeneration
         let tags = Task { await loadMetadata(from: url) }
-        do {
-            format = try player.load(path: url.path)
-            metadata = nil
-            Task { @MainActor in
-                metadata = await tags.value
+
+        // `load` pode fazer `stop_and_release`, que junta a thread produtora e espera o
+        // hardware confirmar a troca de rate — até 2 s. Bloquear a main actor por isso
+        // travaria a janela inteira; o trabalho roda fora dela, como em `toggle()`.
+        pendingCommand = Task {
+            do {
+                let loaded = try await Task.detached { [player] in
+                    try player.load(path: url.path)
+                }.value
+                // Uma abertura mais nova já pode ter começado enquanto esta esperava o
+                // hardware — sem este cheque, ela sobrescreveria a faixa certa com a errada.
+                guard generation == openGeneration else { return }
+                format = loaded
+                metadata = nil
                 refresh()
+            } catch {
+                guard generation == openGeneration else { return }
+                format = nil
+                metadata = nil
+                errorMessage = "\(error)"
+                refresh()
+                return
             }
-            volume = Double(player.snapshot().volumeScalar)
-            refresh()
-        } catch {
-            format = nil
-            metadata = nil
-            errorMessage = "\(error)"
+            let meta = await tags.value
+            guard generation == openGeneration else { return }
+            metadata = meta
             refresh()
         }
     }
@@ -106,35 +131,48 @@ public final class PlayerViewModel: ObservableObject {
             } catch {
                 errorMessage = "\(error)"
             }
+            // Só o `play()` publica volume no `SharedStatus` do lado Rust — quando o teto de
+            // segurança agiu, é aqui, ao fim do comando, que o slider precisa reler o valor
+            // real do hardware.
+            volume = Double(player.snapshot().volumeScalar)
             refresh()
         }
     }
 
     public func applyVolume(_ scalar: Double) {
+        // Publica na hora: o slider não pode esperar o mutex do lado Rust — o mesmo que um
+        // `play()` segura durante a aquisição inteira do hog — para responder ao arrasto.
         volume = scalar
         // O volume é a única coisa nesta interface que mexe em quanto sinal chega ao fone —
         // falhar calado aqui, como o shutdown, deixaria o usuário sem saber que o device não
         // mudou de verdade.
-        do {
-            try player.setVolume(scalar: Float(scalar))
-            errorMessage = nil
-        } catch {
-            // O valor publicado tem de dizer a verdade: se o device recusou, o slider não
-            // pode continuar exibindo o pedido como se tivesse sido aceito. O snapshot é a
-            // fonte confiável do volume real, mantida pelo engine — nada de cache próprio.
-            volume = Double(player.snapshot().volumeScalar)
-            errorMessage = "\(error)"
+        pendingCommand = Task {
+            do {
+                try await Task.detached { [player] in
+                    try player.setVolume(scalar: Float(scalar))
+                }.value
+                errorMessage = nil
+            } catch {
+                // O valor publicado tem de dizer a verdade: se o device recusou, o slider não
+                // pode continuar exibindo o pedido como se tivesse sido aceito. O snapshot é a
+                // fonte confiável do volume real, mantida pelo engine — nada de cache próprio.
+                volume = Double(player.snapshot().volumeScalar)
+                errorMessage = "\(error)"
+            }
         }
     }
 
     public func shutdown() {
         stopPolling()
         // `shutdown()` lança justamente para sinalizar quando o device não volta ao estado
-        // original — engolir em silêncio deixaria o Mac com outro sample rate sem aviso.
+        // original — engolir em silêncio deixaria o Mac com outro sample rate sem aviso. A
+        // janela que exibiria `errorMessage` já está sendo destruída neste instante: o log é
+        // o único canal que sobrevive ao processo para registrar o que aconteceu.
         do {
             try player.shutdown()
         } catch {
             errorMessage = "\(error)"
+            logger.error("falha ao encerrar o player: \(String(describing: error), privacy: .public)")
         }
     }
 }
