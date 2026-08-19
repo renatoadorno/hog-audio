@@ -28,42 +28,47 @@ final class FakePlayer: HogPlayerProtocol, @unchecked Sendable {
 
 @Test @MainActor func oBotaoTocaQuandoParadoEPausaQuandoTocando() async {
     let fake = FakePlayer()
-    let vm = PlayerViewModel(player: fake)
+    let model = PlayerViewModel(player: fake)
 
     fake.estado = .loaded
-    vm.refresh()
-    vm.toggle()
+    model.refresh()
+    model.toggle()
     // O comando roda numa task de fundo — aguarda ela terminar em vez de adivinhar por tempo.
-    await vm.pendingCommand?.value
+    await model.pendingCommand?.value
     #expect(fake.chamadas.contains("play"))
 
     fake.estado = .playing
-    vm.refresh()
-    vm.toggle()
-    await vm.pendingCommand?.value
+    model.refresh()
+    model.toggle()
+    await model.pendingCommand?.value
     #expect(fake.chamadas.contains("pause"))
 }
 
 @Test @MainActor func semFaixaCarregadaOBotaoNaoFazNada() {
     let fake = FakePlayer()
-    let vm = PlayerViewModel(player: fake)
-    vm.refresh()
-    vm.toggle()
+    let model = PlayerViewModel(player: fake)
+    model.refresh()
+    model.toggle()
     #expect(fake.chamadas.isEmpty)
+    // `pendingCommand` é atribuído de forma síncrona dentro de `toggle()` — se o guard fosse
+    // removido, `chamadas` continuaria vazio no instante desta asserção (a task só roda depois
+    // que esta função síncrona devolve o controle), mas `pendingCommand` já não seria nil.
+    // É essa asserção que distingue guard presente de guard removido.
+    #expect(model.pendingCommand == nil)
 }
 
 @Test @MainActor func oVolumeVaiDeZeroAUmParaOEngine() {
     let fake = FakePlayer()
-    let vm = PlayerViewModel(player: fake)
-    vm.applyVolume(0.35)
+    let model = PlayerViewModel(player: fake)
+    model.applyVolume(0.35)
     #expect(fake.volumeAplicado == 0.35)
 }
 
 @Test @MainActor func oRefreshAtualizaOQueATelaMostra() {
     let fake = FakePlayer()
     fake.estado = .playing
-    let vm = PlayerViewModel(player: fake)
-    vm.refresh()
-    #expect(vm.display.isPlaying)
-    #expect(vm.display.canPause)
+    let model = PlayerViewModel(player: fake)
+    model.refresh()
+    #expect(model.display.isPlaying)
+    #expect(model.display.canPause)
 }

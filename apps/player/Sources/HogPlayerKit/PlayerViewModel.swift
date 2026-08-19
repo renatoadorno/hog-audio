@@ -45,6 +45,15 @@ public final class PlayerViewModel: ObservableObject {
         timer = nil
     }
 
+    // `isolated`: `timer` é estado da main actor, e `Timer` não é `Sendable` — sem isolar o
+    // deinit, o compilador reprova o acesso.
+    isolated deinit {
+        // A garantia não pode depender de a camada de interface lembrar de chamar
+        // `stopPolling`/`shutdown` antes do descarte — sem isto o timer, retido pelo run
+        // loop, dispara para sempre chamando um closure que não faz mais nada.
+        timer?.invalidate()
+    }
+
     public func refresh() {
         display = displayState(
             snapshot: player.snapshot(), metadata: metadata, format: format
@@ -91,6 +100,9 @@ public final class PlayerViewModel: ObservableObject {
                         try player.play()
                     }
                 }.value
+                // Limpa uma falha anterior: sem isto, um play() que falhou deixaria a
+                // mensagem de erro presa na tela mesmo depois de um pause() bem-sucedido.
+                errorMessage = nil
             } catch {
                 errorMessage = "\(error)"
             }
@@ -100,7 +112,15 @@ public final class PlayerViewModel: ObservableObject {
 
     public func applyVolume(_ scalar: Double) {
         volume = scalar
-        try? player.setVolume(scalar: Float(scalar))
+        // O volume é a única coisa nesta interface que mexe em quanto sinal chega ao fone —
+        // falhar calado aqui, como o shutdown, deixaria o usuário sem saber que o device não
+        // mudou de verdade.
+        do {
+            try player.setVolume(scalar: Float(scalar))
+            errorMessage = nil
+        } catch {
+            errorMessage = "\(error)"
+        }
     }
 
     public func shutdown() {
