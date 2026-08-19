@@ -3,5 +3,14 @@ name = "hog-audio"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+name = "hog_audio"
+crate-type = ["lib", "staticlib"]
+path = "src/lib.rs"
+
+[[bin]]
+name = "hog-audio"
+path = "src/main.rs"
+
 [dependencies]
 coreaudio-sys = "0.2.18"

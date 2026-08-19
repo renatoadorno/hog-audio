@@ -1,10 +1,3 @@
-mod device;
-mod ffi;
-mod format;
-mod ring;
-mod source;
-mod volume;
-
 use std::cell::UnsafeCell;
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
@@ -12,11 +5,11 @@ use std::sync::Arc;
 
 use coreaudio_sys::*;
 
-use device::{query_default_output_device, HoggedDevice, OutputDevice};
-use format::{validate_interleaved_format, FileFormat};
-use ring::{aligned_read_size, RingBuffer};
-use source::AudioSource;
-use volume::{apply_ceiling, parse_volume, VolumeRequest, VolumeUnit};
+use hog_audio::device::{query_default_output_device, HoggedDevice, OutputDevice};
+use hog_audio::format::{self, validate_interleaved_format, FileFormat};
+use hog_audio::ring::{aligned_read_size, RingBuffer};
+use hog_audio::source::AudioSource;
+use hog_audio::volume::{apply_ceiling, parse_volume, VolumeRequest, VolumeUnit};
 
 const DEFAULT_CEILING: f64 = 0.5;
 const DUMP_BLOCK_FRAMES: usize = 512;
