@@ -11,13 +11,21 @@ import HogAudioBindings
 
 @Test func arquivoInexistenteLancaErroTipado() {
     let player = HogPlayer()
-    #expect(throws: PlayerError.self) {
+    do {
         _ = try player.load(path: "/tmp/nao-existe-mesmo-12345.flac")
+        Issue.record("deveria ter lançado")
+    } catch let erro as PlayerError {
+        guard case .Load = erro else {
+            Issue.record("esperava .Load, veio \(erro)")
+            return
+        }
+    } catch {
+        Issue.record("esperava PlayerError, veio \(error)")
     }
 }
 
 @Test func aInterpretacaoDeVolumeAtravessaAFronteira() {
-    // A regra vive no Rust; a interface nao pode ter uma segunda copia dela.
+    // A regra vive no Rust; a interface não pode ter uma segunda cópia dela.
     #expect(parseVolumeText(text: "35") == 0.35)
     #expect(parseVolumeText(text: "35%") == 0.35)
     #expect(parseVolumeText(text: "35x") == nil)
