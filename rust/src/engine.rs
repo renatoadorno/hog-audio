@@ -179,9 +179,31 @@ impl Engine {
         let codec = source.codec_name().to_string();
         let total_frames = source.total_frames();
 
-        // A negociação corre pelo mesmo motivo, e antes do lock: um arquivo válido cujo
-        // formato o device recusa não pode apagar a faixa que já estava carregada e tocável.
-        let device = query_default_output_device()?;
+        // Quando já há um device retido (uma faixa tocando ou pausada), a negociação usa o
+        // mesmo `OutputDevice` de novo em vez de perguntar ao sistema: sob hog mode, o "device
+        // de saída padrão" que o macOS relata é outro hardware — o mesmo efeito documentado no
+        // README (seção Volume) para o volume, e que fez o teste de mutação da Correção 1
+        // desta onda precisar sair do nível de `Engine`. Perguntar ao sistema nessa condição
+        // faria a faixa nova tocar num device físico diferente do que o usuário está ouvindo
+        // (e negociar contra as capacidades erradas). As `caps` guardadas continuam válidas —
+        // formatos físicos e taxas suportadas não mudam com o tempo — e o rate, desde a
+        // Correção 1, já vem de uma releitura ao vivo dentro de `acquire()`, não daqui.
+        let held_device = {
+            let inner = self.lock();
+            if inner.hogged.is_some() {
+                inner.device.clone()
+            } else {
+                None
+            }
+        };
+
+        // A negociação corre antes do lock (de novo, se `held_device` for `None`) pelo mesmo
+        // motivo de sempre: um arquivo válido cujo formato o device recusa não pode apagar a
+        // faixa que já estava carregada e tocável.
+        let device = match held_device {
+            Some(device) => device,
+            None => query_default_output_device()?,
+        };
         let decision = format::negotiate(&file_format, &device.caps);
         if !decision.play {
             return Err(decision.reason);
@@ -837,6 +859,63 @@ mod tests {
             engine.lock().source.is_some(),
             "a fonte da faixa anterior não pode ser descartada por uma negociação que falhou"
         );
+    }
+
+    #[test]
+    #[ignore = "precisa de um device de saída real; toma o device por alguns segundos"]
+    fn carregar_segunda_faixa_com_device_retido_nao_troca_de_hardware() {
+        // Sob hog mode, o macOS aponta "o device de saída padrão" para outro hardware — o
+        // mesmo efeito documentado no README (seção Volume) e que fez o teste de mutação da
+        // Correção 1 desta onda ter que sair do nível de `Engine`. Sem a correção que reusa
+        // `inner.device` quando `inner.hogged.is_some()`, carregar uma segunda faixa com a
+        // primeira ainda tocando faria a negociação (e a aquisição seguinte) mirar outro
+        // device físico — o som mudaria de saída sem o usuário pedir. Neste Mac, com fone
+        // conectado, isso é observável de forma direta: o id/nome do device muda de "Fones de
+        // Ouvido Externos" para "Alto-falantes (MacBook Air)" quando `load()` volta a
+        // consultar o default enquanto o fone está retido.
+        let primeira = "../testdata/t96_24.flac";
+        let segunda = "../testdata/t44_16.flac";
+        for path in [primeira, segunda] {
+            if !std::path::Path::new(path).exists() {
+                panic!("fixture ausente: {path} (gere com ffmpeg)");
+            }
+        }
+
+        let engine = Engine::new();
+        engine.load(primeira).expect("deveria carregar a primeira faixa");
+        engine.play().expect("deveria tocar a primeira faixa");
+        assert_eq!(engine.state(), PlayerState::Playing);
+
+        let (id_antes, nome_antes) = {
+            let inner = engine.lock();
+            let d = inner.device.as_ref().expect("device deveria estar consultado");
+            (d.id, d.name.clone())
+        };
+
+        // Carrega a segunda faixa com a primeira ainda tocando/retida: é exatamente a
+        // condição em que o "device de saída padrão" do sistema mente.
+        engine.load(segunda).expect("deveria carregar a segunda faixa");
+        assert_eq!(engine.state(), PlayerState::Loaded);
+
+        let (id_depois, nome_depois) = {
+            let inner = engine.lock();
+            let d = inner.device.as_ref().expect("device deveria estar consultado");
+            (d.id, d.name.clone())
+        };
+
+        assert_eq!(
+            id_antes, id_depois,
+            "load() deveria reutilizar o device retido ({nome_antes}, id {id_antes}), mas \
+             passou a usar outro ({nome_depois}, id {id_depois}) — sinal de que voltou a \
+             consultar o default output device com a primeira faixa ainda retida"
+        );
+        assert_eq!(
+            nome_antes, nome_depois,
+            "o nome do device também trocou — mesmo sintoma, checagem independente do id"
+        );
+
+        engine.shutdown().expect("deveria restaurar o device");
+        assert_eq!(engine.state(), PlayerState::Idle);
     }
 
     #[test]

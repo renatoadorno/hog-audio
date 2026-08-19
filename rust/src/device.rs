@@ -14,6 +14,11 @@ const SCOPE_OUTPUT: u32 = kAudioObjectPropertyScopeOutput;
 
 /// O device de saída e tudo que ele aceita. `physical_formats` é paralelo a
 /// `caps.physical_formats`: o núcleo escolhe um índice, aqui está o descritor correspondente.
+///
+/// `Clone` existe para `Engine::load` poder reutilizar o device já retido em vez de perguntar
+/// ao sistema de novo — sob hog mode, a resposta do sistema é outro hardware (ver o
+/// comentário lá).
+#[derive(Clone)]
 pub struct OutputDevice {
     pub id: AudioObjectID,
     pub stream_id: AudioObjectID,
