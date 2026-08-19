@@ -67,13 +67,17 @@ private func item(_ keySpace: String, _ key: String, _ value: String) -> Metadat
     #expect(meta.artwork == jpeg)
 }
 
-@Test func leUmFlacRealComCapa() async {
-    // Caminho relativo a apps/player, que é de onde `swift test` roda.
-    let url = URL(fileURLWithPath: "../../musicas/Skyfall.flac")
-    guard FileManager.default.fileExists(atPath: url.path) else {
-        return // o arquivo não é versionado; sem ele não há o que verificar
-    }
-    let meta = await loadMetadata(from: url)
+// Caminhos relativos a apps/player, que é de onde `swift test` roda. Os arquivos não são
+// versionados — `.enabled(if:)` faz o Swift Testing reportar os quatro testes abaixo como
+// **skipped**, não como um "passou" que na verdade nunca rodou.
+private let skyfallFlacPath = "../../musicas/Skyfall.flac"
+private let houseOfMemoriesFlacPath = "../../musicas/10-House-of-Memories.flac"
+private let metaFixtureM4aPath = "../../testdata/meta_fixture.m4a"
+private let metaFixtureMp3Path = "../../testdata/meta_fixture.mp3"
+
+@Test(.enabled(if: FileManager.default.fileExists(atPath: skyfallFlacPath)))
+func leUmFlacRealComCapa() async {
+    let meta = await loadMetadata(from: URL(fileURLWithPath: skyfallFlacPath))
     #expect(meta.title == "Skyfall")
     #expect(meta.artist == "Adele")
     // O AVFoundation desmonta o bloco de imagem do FLAC e entrega JPEG puro: FF D8 é o
@@ -82,10 +86,9 @@ private func item(_ keySpace: String, _ key: String, _ value: String) -> Metadat
     #expect(meta.artwork?.prefix(2).elementsEqual([0xFF, 0xD8]) == true)
 }
 
-@Test func leUmFlacRealSemCapa() async {
-    let url = URL(fileURLWithPath: "../../musicas/10-House-of-Memories.flac")
-    guard FileManager.default.fileExists(atPath: url.path) else { return }
-    let meta = await loadMetadata(from: url)
+@Test(.enabled(if: FileManager.default.fileExists(atPath: houseOfMemoriesFlacPath)))
+func leUmFlacRealSemCapa() async {
+    let meta = await loadMetadata(from: URL(fileURLWithPath: houseOfMemoriesFlacPath))
     #expect(meta.title == "House of Memories")
     #expect(meta.artist == "Panic! At The Disco")
     #expect(meta.album == "Death of a Bachelor")
@@ -108,20 +111,18 @@ private func item(_ keySpace: String, _ key: String, _ value: String) -> Metadat
 //     -metadata title="Titulo Teste" -metadata artist="Artista Teste" \
 //     -metadata album="Album Teste" testdata/meta_fixture.mp3
 
-@Test func leUmM4aRealComCapa() async {
-    let url = URL(fileURLWithPath: "../../testdata/meta_fixture.m4a")
-    guard FileManager.default.fileExists(atPath: url.path) else { return }
-    let meta = await loadMetadata(from: url)
+@Test(.enabled(if: FileManager.default.fileExists(atPath: metaFixtureM4aPath)))
+func leUmM4aRealComCapa() async {
+    let meta = await loadMetadata(from: URL(fileURLWithPath: metaFixtureM4aPath))
     #expect(meta.title == "Titulo Teste")
     #expect(meta.artist == "Artista Teste")
     #expect(meta.album == "Album Teste")
     #expect(meta.artwork != nil)
 }
 
-@Test func leUmMp3RealComCapa() async {
-    let url = URL(fileURLWithPath: "../../testdata/meta_fixture.mp3")
-    guard FileManager.default.fileExists(atPath: url.path) else { return }
-    let meta = await loadMetadata(from: url)
+@Test(.enabled(if: FileManager.default.fileExists(atPath: metaFixtureMp3Path)))
+func leUmMp3RealComCapa() async {
+    let meta = await loadMetadata(from: URL(fileURLWithPath: metaFixtureMp3Path))
     #expect(meta.title == "Titulo Teste")
     #expect(meta.artist == "Artista Teste")
     #expect(meta.album == "Album Teste")
