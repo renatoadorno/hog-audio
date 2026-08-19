@@ -156,8 +156,15 @@ e mostrar título, artista, álbum e capa quando embutida.
 
 **Comportamentos que são decisão, não defeito:**
 
-- O Mac fica mudo enquanto o player segura o device — **inclusive pausado, e inclusive depois
-  que a faixa termina**. Na pausa é de propósito: soltar o device tiraria a garantia de
+- Enquanto o player segura o device, **nenhum outro app consegue usá-lo** — inclusive com a
+  reprodução pausada, e inclusive depois que a faixa termina. O que os outros apps fazem
+  depende do hardware disponível: se houver outra saída, o macOS aponta o *default output*
+  para ela e o som deles sai por lá (num MacBook com fone conectado, pelos alto-falantes
+  embutidos); se o device sequestrado for o único, eles ficam sem som. Isso é do Core Audio,
+  não uma escolha deste player — vale para qualquer app que use hog mode exclusivo. É também a
+  razão de o próprio player nunca confiar no *default output* enquanto segura um device: sob
+  hog, essa consulta responde outro hardware.
+  Na pausa o device é mantido de propósito: soltá-lo tiraria a garantia de
   retomar na hora e sem risco de outro app tomar o device nesse meio-tempo. Já no fim da faixa
   é um efeito colateral de como o código está hoje: só a reprodução para (`AudioDeviceStop`) —
   o hog mode continua retido até carregar outra faixa ou fechar o player. Soltá-lo
