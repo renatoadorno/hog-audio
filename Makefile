@@ -4,8 +4,9 @@ RUST_BIN  := rust/target/release/hog-audio
 RUST_LIB  := rust/target/release/libhog_audio.a
 FFI_DIR   := apps/player/Sources/HogAudioFFI
 BIND_DIR  := apps/player/Sources/HogAudioBindings
+APP_DIR   := apps/player/HogAudio.app
 
-.PHONY: all cpp cpp-test cpp-asan rust rust-test rust-lib bindings swift-test test verify verify-pause verify-volume info play clean
+.PHONY: all cpp cpp-test cpp-asan rust rust-test rust-lib bindings swift-test test verify verify-pause verify-volume info play app run-app clean
 
 all: cpp rust
 
@@ -97,6 +98,19 @@ info: cpp
 play: cpp
 	@test -n "$(FILE)" || { echo "uso: make play FILE=caminho/do/arquivo.flac"; exit 2; }
 	@./$(CPP_BUILD)/hog-audio "$(FILE)"
+
+# Monta o .app: sem Info.plist o macOS trata o binário como processo de segundo plano e
+# ele nunca abre janela nem recebe foco de teclado.
+app: bindings
+	@cd apps/player && swift build -c release
+	@mkdir -p $(APP_DIR)/Contents/MacOS
+	@cp apps/player/Resources/Info.plist $(APP_DIR)/Contents/Info.plist
+	@cp apps/player/.build/release/HogPlayer $(APP_DIR)/Contents/MacOS/HogAudio
+	@echo "app montado em $(APP_DIR)"
+
+# make run-app FILE=musicas/faixa.flac
+run-app: app
+	@$(APP_DIR)/Contents/MacOS/HogAudio "$(FILE)"
 
 clean:
 	@rm -rf $(CPP_BUILD) cpp/build-asan rust/target

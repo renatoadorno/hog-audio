@@ -128,6 +128,53 @@ alterado, corrigível tocando qualquer outra coisa ou pelo Configuração de Áu
 - O device é escolhido no início da reprodução. Plugar um fone no meio da faixa não migra o
   áudio, porque o device já está tomado.
 
+## App gráfico (HogAudio.app)
+
+O mesmo núcleo ganha uma janela: `apps/player` é um pacote Swift que fala com o engine Rust
+por FFI. Rodado como binário solto pelo Terminal ele **não abre janela** — sem `Info.plist`, o
+macOS trata o processo como segundo plano. O `.app` existe só por isso.
+
+```
+make app
+open apps/player/HogAudio.app
+```
+
+Ou já com uma faixa:
+
+```
+make run-app FILE=musicas/faixa.flac
+```
+
+Não há entitlement de sandbox de propósito: hog mode não sobrevive a ele, o que fecha a porta
+da App Store — não é objetivo deste projeto. Também não há assinatura de código nem ícone
+customizado (YAGNI).
+
+**O que o player faz:** abrir um arquivo (painel ou arrastar), tocar, pausar, ajustar o volume
+e mostrar título, artista, álbum e capa quando embutida.
+
+**O que ele não faz:** sem seek, sem lista de reprodução — uma faixa por vez.
+
+**Comportamentos que são decisão, não defeito:**
+
+- O Mac fica mudo enquanto o player segura o device — **inclusive pausado**. O hog mode só é
+  liberado quando a faixa termina ou o player fecha, nunca só por pausar.
+- Encerrar o processo à força (force-quit, `kill -9`) devolve o modo exclusivo pelo sistema,
+  mas deixa o **sample rate trocado**; corrige tocando qualquer outra coisa ou pelo
+  Configuração de Áudio e MIDI.
+- Tirar o fone durante a reprodução **não é tratado nesta versão**: o device já foi tomado no
+  início da faixa, o relógio congela e a única saída é fechar o player.
+
+## As três provas de bit-perfect
+
+É o que diferencia este projeto de um tocador comum: qualquer alteração no caminho do áudio
+tem que continuar batendo nas três.
+
+```
+make verify FILE=testdata/t96_24.flac BITS=24  # C++ e Rust batem, amostra a amostra, com o PCM do ffmpeg
+make verify-pause FILE=testdata/t96_24.flac    # pausar no meio não descarta nem duplica byte do ring buffer
+make verify-volume FILE=testdata/t96_24.flac   # volume muda no device, nunca nas amostras entregues
+```
+
 ## Estrutura
 
 ```
