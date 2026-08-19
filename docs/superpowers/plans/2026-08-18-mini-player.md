@@ -2641,7 +2641,7 @@ timer é o que as torna testáveis sem hardware e sem esperar segundos passarem.
 
 **Interfaces:**
 - Consumes: `Snapshot`, `PlayerState`, `TrackFormat` dos bindings; `TrackMetadata` da Task 10.
-- Produces: `func formatTime(_ seconds: Double) -> String`; `DisplayState { title, artist, album, artwork, elapsed, total, progress, canPlay, canPause, isPlaying, technicalLine, message }`; `func displayState(snapshot:metadata:format:) -> DisplayState`.
+- Produces: `func formatTime(_ seconds: Double) -> String`; `DisplayState { title, artist, album, artwork, elapsed, total, progress, canPlay, canPause, isPlaying, technicalLine }` — o erro é publicado à parte pelo ViewModel, não faz parte do estado de exibição; `func displayState(snapshot:metadata:format:) -> DisplayState`.
 
 - [ ] **Step 1: Escrever os testes que falham**
 
