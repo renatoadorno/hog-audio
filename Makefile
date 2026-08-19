@@ -110,6 +110,7 @@ app: bindings
 
 # make run-app FILE=musicas/faixa.flac
 run-app: app
+	@test -n "$(FILE)" || { echo "uso: make run-app FILE=caminho/do/arquivo.flac"; exit 2; }
 	@$(APP_DIR)/Contents/MacOS/HogAudio "$(FILE)"
 
 clean:

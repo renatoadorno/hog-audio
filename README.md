@@ -156,8 +156,9 @@ e mostrar título, artista, álbum e capa quando embutida.
 
 **Comportamentos que são decisão, não defeito:**
 
-- O Mac fica mudo enquanto o player segura o device — **inclusive pausado**. O hog mode só é
-  liberado quando a faixa termina ou o player fecha, nunca só por pausar.
+- O Mac fica mudo enquanto o player segura o device — **inclusive pausado**. É de propósito:
+  soltar o device na pausa tiraria a garantia de retomar na hora e sem risco de outro app tomar
+  o device nesse meio-tempo. O hog mode só é liberado quando a faixa termina ou o player fecha.
 - Encerrar o processo à força (force-quit, `kill -9`) devolve o modo exclusivo pelo sistema,
   mas deixa o **sample rate trocado**; corrige tocando qualquer outra coisa ou pelo
   Configuração de Áudio e MIDI.
@@ -193,11 +194,11 @@ mais importa e a única que dá para verificar sem plugar um fone.
 
 ```
 make test        # testes do núcleo puro
-make test-asan   # os mesmos testes sob AddressSanitizer e UBSan
+make cpp-asan    # os mesmos testes sob AddressSanitizer e UBSan
 make info FILE=musicas/faixa.flac
 make play FILE=musicas/faixa.flac
 ```
 
 O IOProc roda em thread de tempo real: dentro dele só existem `memcpy` e operações atômicas —
 nada de alocar, travar ou imprimir. Alterações naquele caminho devem ser verificadas com
-`make test-asan`.
+`make cpp-asan`.
