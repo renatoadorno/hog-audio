@@ -70,14 +70,16 @@ impl Engine {
         let codec = source.codec_name().to_string();
         let total_frames = source.total_frames();
 
-        let mut inner = self.lock();
-        self.teardown(&mut inner);
-
+        // A negociação corre pelo mesmo motivo, e antes do lock: um arquivo válido cujo
+        // formato o device recusa não pode apagar a faixa que já estava carregada e tocável.
         let device = query_default_output_device()?;
         let decision = format::negotiate(&file_format, &device.caps);
         if !decision.play {
             return Err(decision.reason);
         }
+
+        let mut inner = self.lock();
+        self.teardown(&mut inner);
 
         let device_name = device.name.clone();
         let target = next_state(inner.state, Command::Load).map_err(|e| e.message.to_string())?;
@@ -102,7 +104,7 @@ impl Engine {
     }
 
     /// Descarta o que estiver carregado. A Task 6 estende isto para também parar as threads e
-    /// devolver o device.
+    /// devolver o device — daí o `&self` já presente, embora esta versão não o use.
     fn teardown(&self, inner: &mut EngineInner) {
         inner.source = None;
         inner.decision = None;
@@ -172,5 +174,37 @@ mod tests {
         let track = engine.load(b).expect("deveria carregar o segundo");
         assert_eq!(track.sample_rate, 44100.0);
         assert_eq!(engine.state(), PlayerState::Loaded);
+    }
+
+    #[test]
+    #[ignore = "precisa de um device de saída real"]
+    fn negociacao_recusada_preserva_a_faixa_carregada() {
+        // 192 kHz não está entre os rates do device built-in: a negociação recusa antes de
+        // qualquer teardown acontecer.
+        let anterior = "../testdata/t96_24.flac";
+        let recusado = "../testdata/t192_24.flac";
+        if !std::path::Path::new(anterior).exists() || !std::path::Path::new(recusado).exists() {
+            eprintln!("pulando: testdata ausente");
+            return;
+        }
+        let engine = Engine::new();
+        engine.load(anterior).expect("deveria carregar a primeira faixa");
+
+        assert!(engine.load(recusado).is_err());
+
+        // O que dá valor ao teste: a faixa anterior sobrevive à tentativa recusada, em vez de
+        // deixar o engine em Loaded com nada de fato carregado.
+        assert_eq!(engine.state(), PlayerState::Loaded);
+        assert!((engine.status().total_seconds() - 6.0).abs() < 0.1);
+
+        // `state()` e `total_seconds()` sozinhos não provam nada: teardown() nunca mexe em
+        // `self.status`, e a atribuição de `state` só acontece depois da negociação aceitar —
+        // então os dois ficam iguais tanto na ordem certa quanto na errada. Só o campo
+        // privado `source`, acessível porque `tests` é submódulo de `engine`, revela se o
+        // teardown rodou cedo demais e apagou a faixa que devia continuar tocável.
+        assert!(
+            engine.lock().source.is_some(),
+            "a fonte da faixa anterior não pode ser descartada por uma negociação que falhou"
+        );
     }
 }
