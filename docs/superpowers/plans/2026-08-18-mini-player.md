@@ -2868,8 +2868,8 @@ da classe concreta gerada.
 - Create: `apps/player/Sources/HogPlayerKit/PlayerViewModel.swift`, `apps/player/Tests/HogPlayerKitTests/ViewModelTests.swift`
 
 **Interfaces:**
-- Consumes: `DisplayState`, `displayState(snapshot:metadata:format:)` da Task 11; `loadMetadata(from:)` da Task 10; `HogPlayer` dos bindings.
-- Produces: `protocol PlayerControlling`; `@MainActor final class PlayerViewModel: ObservableObject` com `display: DisplayState`, `volume: Double`, `errorMessage: String?`, e os métodos `open(url:)`, `toggle()`, `applyVolume(_:)`, `startPolling()`, `stopPolling()`, `shutdown()`.
+- Consumes: `DisplayState`, `displayState(snapshot:metadata:format:)` da Task 11; `loadMetadata(from:)` da Task 10; `HogPlayer` e o protocolo gerado `HogPlayerProtocol` dos bindings.
+- Produces: `@MainActor final class PlayerViewModel: ObservableObject` com `display: DisplayState`, `volume: Double`, `errorMessage: String?`, e os métodos `open(url:)`, `toggle()`, `applyVolume(_:)`, `startPolling()`, `stopPolling()`, `shutdown()`.
 
 - [ ] **Step 1: Escrever os testes que falham**
 
@@ -2883,7 +2883,7 @@ import HogAudioBindings
 
 /// Dublê que registra o que foi chamado. Permite testar a lógica de comando sem tomar o
 /// device de áudio da máquina onde os testes rodam.
-final class FakePlayer: PlayerControlling, @unchecked Sendable {
+final class FakePlayer: HogPlayerProtocol, @unchecked Sendable {
     var chamadas: [String] = []
     var estado: PlayerState = .idle
     var volumeAplicado: Float?
@@ -2960,18 +2960,9 @@ Crie `apps/player/Sources/HogPlayerKit/PlayerViewModel.swift`:
 import Foundation
 import HogAudioBindings
 
-/// O ViewModel fala com este protocolo, não com a classe gerada, para que a lógica de comando
-/// possa ser testada sem tomar o device de áudio da máquina.
-public protocol PlayerControlling: AnyObject {
-    func load(path: String) throws -> TrackFormat
-    func play() throws
-    func pause() throws
-    func setVolume(scalar: Float) throws
-    func snapshot() -> Snapshot
-    func shutdown()
-}
-
-extension HogPlayer: PlayerControlling {}
+// O protocolo que o ViewModel consome é o `HogPlayerProtocol` **gerado pelo uniffi** — ele já
+// declara exatamente os seis métodos e já é `Sendable`. Escrever um protocolo próprio aqui
+// duplicaria a fronteira e sairia de sincronia no dia em que a API do Rust mudasse.
 
 @MainActor
 public final class PlayerViewModel: ObservableObject {
@@ -2979,12 +2970,12 @@ public final class PlayerViewModel: ObservableObject {
     @Published public var volume: Double = 0.5
     @Published public private(set) var errorMessage: String?
 
-    private let player: PlayerControlling
+    private let player: any HogPlayerProtocol
     private var metadata: TrackMetadata?
     private var format: TrackFormat?
     private var timer: Timer?
 
-    public init(player: PlayerControlling) {
+    public init(player: any HogPlayerProtocol) {
         self.player = player
         self.display = displayState(
             snapshot: player.snapshot(), metadata: nil, format: nil
