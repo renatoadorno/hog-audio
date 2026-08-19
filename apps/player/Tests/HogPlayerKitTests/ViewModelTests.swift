@@ -9,6 +9,11 @@ final class FakePlayer: HogPlayerProtocol, @unchecked Sendable {
     var chamadas: [String] = []
     var estado: PlayerState = .idle
     var volumeAplicado: Float?
+    // Volume que o device "de verdade" tem — o que `snapshot()` devolve. Só diverge de
+    // `volumeAplicado` quando `falhaAoAplicarVolume` está setado, simulando uma recusa do
+    // hardware.
+    var volumeReal: Float = 0.5
+    var falhaAoAplicarVolume: Error?
 
     func load(path: String) throws -> TrackFormat {
         chamadas.append("load")
@@ -18,10 +23,14 @@ final class FakePlayer: HogPlayerProtocol, @unchecked Sendable {
     }
     func play() throws { chamadas.append("play"); estado = .playing }
     func pause() throws { chamadas.append("pause"); estado = .paused }
-    func setVolume(scalar: Float) throws { volumeAplicado = scalar }
+    func setVolume(scalar: Float) throws {
+        if let falha = falhaAoAplicarVolume { throw falha }
+        volumeAplicado = scalar
+        volumeReal = scalar
+    }
     func snapshot() -> Snapshot {
         Snapshot(state: estado, elapsedSeconds: 0, totalSeconds: 10,
-                 underruns: 0, volumeScalar: 0.5)
+                 underruns: 0, volumeScalar: volumeReal)
     }
     func shutdown() { chamadas.append("shutdown") }
 }
@@ -62,6 +71,20 @@ final class FakePlayer: HogPlayerProtocol, @unchecked Sendable {
     let model = PlayerViewModel(player: fake)
     model.applyVolume(0.35)
     #expect(fake.volumeAplicado == 0.35)
+}
+
+@Test @MainActor func volumeQueFalhaVoltaAoValorDoDeviceENaoAoPedido() {
+    let fake = FakePlayer()
+    fake.volumeReal = 0.5
+    fake.falhaAoAplicarVolume = PlayerError.Device(message: "device recusou o volume")
+    let model = PlayerViewModel(player: fake)
+
+    model.applyVolume(0.9)
+
+    #expect(model.errorMessage != nil)
+    // O slider não pode continuar exibindo 0.9: o device ficou em 0.5, e é isso que o
+    // snapshot — a fonte confiável — reporta.
+    #expect(model.volume == 0.5)
 }
 
 @Test @MainActor func oRefreshAtualizaOQueATelaMostra() {

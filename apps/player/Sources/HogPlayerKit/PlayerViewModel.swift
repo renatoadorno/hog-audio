@@ -119,6 +119,10 @@ public final class PlayerViewModel: ObservableObject {
             try player.setVolume(scalar: Float(scalar))
             errorMessage = nil
         } catch {
+            // O valor publicado tem de dizer a verdade: se o device recusou, o slider não
+            // pode continuar exibindo o pedido como se tivesse sido aceito. O snapshot é a
+            // fonte confiável do volume real, mantida pelo engine — nada de cache próprio.
+            volume = Double(player.snapshot().volumeScalar)
             errorMessage = "\(error)"
         }
     }
