@@ -5,7 +5,7 @@ RUST_LIB  := rust/target/release/libhog_audio.a
 FFI_DIR   := apps/player/Sources/HogAudioFFI
 BIND_DIR  := apps/player/Sources/HogAudioBindings
 
-.PHONY: all cpp cpp-test cpp-asan rust rust-test rust-lib bindings test verify verify-pause verify-volume info play clean
+.PHONY: all cpp cpp-test cpp-asan rust rust-test rust-lib bindings swift-test test verify verify-pause verify-volume info play clean
 
 all: cpp rust
 
@@ -44,7 +44,10 @@ bindings: rust-lib
 	@echo '// um alvo C do SPM exige ao menos um arquivo-fonte' > $(FFI_DIR)/empty.c
 	@echo "bindings gerados em $(FFI_DIR) e $(BIND_DIR)"
 
-test: cpp-test rust-test
+swift-test: bindings
+	@cd apps/player && swift test
+
+test: cpp-test rust-test swift-test
 
 # make verify FILE=testdata/t96_24.flac BITS=24
 # Compara os bytes que cada implementação entregaria ao IOProc com o PCM que o ffmpeg
