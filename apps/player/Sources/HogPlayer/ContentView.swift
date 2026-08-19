@@ -107,6 +107,9 @@ struct ContentView: View {
         panel.canChooseDirectories = false
         panel.allowedContentTypes = [.audio]
         if panel.runModal() == .OK, let url = panel.url {
+            // Sem isto, um erro de drop anterior fica preso na tela mesmo depois de um
+            // arquivo válido carregar com sucesso pelo painel.
+            dropError = nil
             model.open(url: url)
         }
     }
