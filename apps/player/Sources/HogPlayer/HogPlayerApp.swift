@@ -1,4 +1,6 @@
 import AppKit
+import Darwin
+import Dispatch
 import HogPlayerKit
 import SwiftUI
 
@@ -28,6 +30,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // encerramento do processo encontre o modelo nulo.
     let model = PlayerViewModel()
 
+    // `DispatchSourceSignal` é cancelado se for desalocado — sem retê-las aqui, os handlers
+    // instalados em `installSignalHandlers()` nunca disparariam.
+    private var signalSources: [DispatchSourceSignal] = []
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        installSignalHandlers()
+    }
+
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         true
     }
@@ -35,5 +45,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         // Sem isto o device fica travado no rate e no formato da última faixa.
         model.shutdown()
+    }
+
+    // `make run-app` — o loop de desenvolvimento documentado no README — roda o binário em
+    // primeiro plano, preso ao terminal: Ctrl+C manda SIGINT direto ao processo, sem passar
+    // por `applicationWillTerminate`. O mesmo vale para SIGTERM e para SIGHUP (fechar a
+    // janela do terminal). A CLI deste projeto já protege os mesmos sinais; a interface não
+    // podia chegar menos protegida que o binário que ela substitui.
+    private func installSignalHandlers() {
+        for sig in [SIGINT, SIGTERM, SIGHUP] {
+            // Descarta a disposição default do sinal: sem isto o processo morre antes de o
+            // `DispatchSource` abaixo ter qualquer chance de rodar.
+            signal(sig, SIG_IGN)
+            let source = DispatchSource.makeSignalSource(signal: sig, queue: .main)
+            source.setEventHandler { [weak self] in
+                // Um handler POSIX direto seria async-signal-unsafe; o `DispatchSource`
+                // entrega o evento em contexto normal — mas o compilador só reconhece isolamento
+                // de main actor num salto explícito, daí o `Task { @MainActor in ... }`.
+                Task { @MainActor in
+                    self?.model.shutdown()
+                    NSApp.terminate(nil)
+                }
+            }
+            source.resume()
+            signalSources.append(source)
+        }
     }
 }
