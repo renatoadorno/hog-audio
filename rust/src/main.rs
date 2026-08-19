@@ -1,18 +1,11 @@
 use std::io::Write;
 use std::sync::atomic::{AtomicI32, Ordering};
-use std::sync::Arc;
 
-use coreaudio_sys::*;
-
-use hog_audio::device::{query_default_output_device, HoggedDevice, OutputDevice};
-use hog_audio::format::{self, validate_interleaved_format, FileFormat};
-use hog_audio::playback::{io_proc, Playback};
+use hog_audio::engine::{Engine, LoadedTrack, VolumeOutcome, DEFAULT_CEILING};
 use hog_audio::ring::aligned_read_size;
-use hog_audio::source::AudioSource;
-use hog_audio::status::SharedStatus;
-use hog_audio::volume::{apply_ceiling, parse_volume, VolumeRequest, VolumeUnit};
+use hog_audio::transitions::PlayerState;
+use hog_audio::volume::{parse_volume, VolumeRequest, VolumeUnit};
 
-const DEFAULT_CEILING: f64 = 0.5;
 const DUMP_BLOCK_FRAMES: usize = 512;
 
 // Declarado à mão em vez de trazer a crate libc: a comparação com o C++ exige dependência
@@ -36,137 +29,48 @@ fn interrupted() -> bool {
     INTERRUPTED.load(Ordering::Relaxed) != 0
 }
 
-fn describe_format(f: &AudioStreamBasicDescription) -> String {
-    let kind = if f.mFormatFlags & kAudioFormatFlagIsFloat != 0 {
-        "float"
-    } else {
-        "inteiro"
-    };
-    let layout = if f.mFormatFlags & kAudioFormatFlagIsNonInterleaved != 0 {
-        ", não intercalado"
-    } else {
-        ""
-    };
-    format!(
-        "{} Hz / {} bits {} / {} canais{}",
-        f.mSampleRate as i64, f.mBitsPerChannel, kind, f.mChannelsPerFrame, layout
-    )
-}
-
-fn describe_source(source: &AudioSource) -> String {
-    let f: FileFormat = source.format();
-    format!(
-        "{} — {} Hz / {} bits / {} canais",
-        source.codec_name(),
-        f.sample_rate as i64,
-        f.bit_depth,
-        f.channels
-    )
-}
-
-/// Descreve o volume que o device realmente assumiu, lido do hardware. A conversão de escalar
-/// para decibéis publicada pelo HAL não bate com a curva aplicada de fato, então exibir o
-/// valor convertido daria um número plausível e errado.
-fn describe_applied_volume(hogged: &HoggedDevice) -> String {
-    match hogged.read_volume() {
-        Some((scalar, decibels)) => format!("{:.0}% ({:.1} dB)", scalar * 100.0, decibels),
-        None => "desconhecido".to_string(),
-    }
-}
-
-fn print_device_report(device: &OutputDevice, source: &AudioSource) {
-    println!("arquivo  : {}", describe_source(source));
-    println!("device   : {}", device.name);
-    println!("rate atual: {} Hz", device.nominal_rate as i64);
-
-    let rates: Vec<String> = device
-        .caps
-        .rates
-        .iter()
-        .map(|r| {
-            if (r.maximum - r.minimum).abs() < 0.5 {
-                format!("{}", r.minimum as i64)
-            } else {
-                format!("{}-{}", r.minimum as i64, r.maximum as i64)
-            }
-        })
-        .collect();
-    println!("rates    : {}", rates.join(", "));
+fn print_track_report(path: &str, track: &LoadedTrack) {
+    println!("arquivo  : {path}");
     println!(
-        "formatos : {} físicos disponíveis",
-        device.physical_formats.len()
+        "fonte    : {} {} Hz / {} bits / {} canais / {:.1} s",
+        track.codec, track.sample_rate, track.bit_depth, track.channels, track.total_seconds
     );
-    for f in &device.physical_formats {
-        println!("           {}", describe_format(f));
-    }
-    if device.volume >= 0.0 {
-        println!("volume   : {:.0}%", device.volume * 100.0);
+    println!("device   : {}", track.device_name);
+}
+
+/// Formata o volume aplicado a partir do que foi de fato lido do hardware. `decibels` como
+/// NaN é o sinal de que a leitura falhou — mesma situação que o antigo "desconhecido".
+fn describe_volume_outcome(outcome: &VolumeOutcome) -> String {
+    if outcome.decibels.is_nan() {
+        "desconhecido".to_string()
+    } else {
+        format!("{:.0}% ({:.1} dB)", outcome.scalar * 100.0, outcome.decibels)
     }
 }
 
-/// Um pedido explícito é uma garantia: se não der para cumprir, é melhor não tocar do que
-/// tocar mais alto do que se pediu. Já o teto é uma rede de proteção — não havendo controle
-/// de volume, avisa e segue, que é o comportamento de sempre.
-fn apply_volume(
-    hogged: &mut HoggedDevice,
-    device: &OutputDevice,
-    request: Option<&VolumeRequest>,
-    ceiling: f64,
-) -> Result<(), String> {
-    if let Some(request) = request {
-        let scalar = match request.unit {
-            VolumeUnit::Percent => request.value as f32,
-            VolumeUnit::Decibels => hogged
-                .decibels_to_scalar(request.value)
-                .ok_or("este device não converte decibéis; use porcentagem")?,
-        };
-        let before = device.volume;
-        hogged.set_volume(scalar)?;
+/// Espelha as linhas que a CLI sempre imprimiu para o volume: pedido explícito, teto que não
+/// precisou agir, teto que baixou o volume, ou device sem controle algum.
+fn print_volume_outcome(outcome: &VolumeOutcome, explicit_request: bool, ceiling: f64) {
+    if !explicit_request && outcome.previous_scalar < 0.0 {
+        println!("volume   : device sem controle de volume; teto não aplicável");
+        return;
+    }
 
-        print!("volume   : {}", describe_applied_volume(hogged));
-        if before >= 0.0 {
-            print!(" [era {:.0}%]", before * 100.0);
+    let applied = describe_volume_outcome(outcome);
+    if explicit_request {
+        print!("volume   : {applied}");
+        if outcome.previous_scalar >= 0.0 {
+            print!(" [era {:.0}%]", outcome.previous_scalar * 100.0);
         }
         println!();
-        return Ok(());
-    }
-
-    if device.volume < 0.0 {
-        println!("volume   : device sem controle de volume; teto não aplicável");
-        return Ok(());
-    }
-
-    // O teto decide sobre o volume lido agora, não sobre o que havia antes de tomar o
-    // device: entre uma coisa e outra o usuário pode ter mexido no volume, e a reconfiguração
-    // do device também pode alterá-lo. Uma proteção que age sobre leitura velha não protege.
-    let current = hogged
-        .read_volume()
-        .map(|(scalar, _)| scalar)
-        .unwrap_or(device.volume);
-
-    let decision = apply_ceiling(current as f64, ceiling);
-    if !decision.apply {
+    } else if outcome.lowered_by_ceiling {
         println!(
-            "volume   : {} (abaixo do teto de {:.0}%)",
-            describe_applied_volume(hogged),
-            ceiling * 100.0
+            "volume   : {applied} [baixado do teto: estava em {:.0}%]",
+            outcome.previous_scalar * 100.0
         );
-        return Ok(());
+    } else {
+        println!("volume   : {applied} (abaixo do teto de {:.0}%)", ceiling * 100.0);
     }
-
-    if let Err(error) = hogged.set_volume(decision.scalar as f32) {
-        println!(
-            "aviso    : volume em {:.0}% e não consegui baixá-lo ({error})",
-            current * 100.0
-        );
-        return Ok(());
-    }
-    println!(
-        "volume   : {} [baixado do teto: estava em {:.0}%]",
-        describe_applied_volume(hogged),
-        current * 100.0
-    );
-    Ok(())
 }
 
 fn usage() -> i32 {
@@ -253,10 +157,6 @@ fn main() {
 }
 
 fn run() -> i32 {
-    // Antes de qualquer coisa que altere o device. Entre tomar o device e instalar os
-    // handlers existiria uma janela em que um Ctrl+C mataria o processo pela disposição
-    // padrão, sem rodar destrutor nenhum — e o sample rate ficaria trocado.
-    // SIGHUP cobre o terminal sendo fechado; SIGQUIT, o Ctrl+\.
     for sig in [SIGINT, SIGTERM, SIGHUP, SIGQUIT] {
         unsafe { signal(sig, on_interrupt as usize) };
     }
@@ -266,179 +166,47 @@ fn run() -> i32 {
         Err(code) => return code,
     };
 
-    let mut source = match AudioSource::open(&options.path) {
-        Ok(source) => source,
+    let engine = Engine::new();
+    engine.set_requested_volume(options.volume.clone(), options.ceiling);
+
+    let track = match engine.load(&options.path) {
+        Ok(track) => track,
         Err(error) => {
             eprintln!("erro: {error}");
             return 1;
         }
     };
 
-    let device = match query_default_output_device() {
-        Ok(device) => device,
-        Err(error) => {
-            eprintln!("erro: {error}");
-            return 1;
-        }
-    };
-
-    print_device_report(&device, &source);
-
-    let file_format = source.format();
-    let decision = format::negotiate(&file_format, &device.caps);
-    if !decision.play {
-        eprintln!("\nnão dá para reproduzir sem perda: {}", decision.reason);
-        return 1;
-    }
-    println!("negociado: {}", decision.reason);
-    if decision.duplicate_mono_to_stereo {
-        println!("aviso    : arquivo mono, será duplicado nos dois canais");
-    }
+    print_track_report(&options.path, &track);
     if options.info_only {
         return 0;
     }
 
-    let seconds = source.total_frames() as f64 / file_format.sample_rate;
+    if let Some(path) = options.dump.as_ref() {
+        return run_dump(&engine, path);
+    }
 
-    let mut hogged = HoggedDevice::new();
-    let physical = device.physical_formats[decision.physical_format_index as usize];
-    if let Err(error) = hogged.acquire(&device, decision.sample_rate, &physical) {
+    if let Err(error) = engine.play() {
         eprintln!("erro: {error}");
         return 1;
     }
+    if let Some(outcome) = engine.volume_outcome() {
+        print_volume_outcome(&outcome, options.volume.is_some(), options.ceiling);
+    }
+    println!("tocando  : {:.1} s — Ctrl+C interrompe", track.total_seconds);
 
-    // O volume é resolvido aqui, com o device já nosso e antes de qualquer amostra sair: é o
-    // único ponto em que dá para garantir que o fone não receba o volume anterior.
-    if let Err(error) =
-        apply_volume(&mut hogged, &device, options.volume.as_ref(), options.ceiling)
-    {
-        eprintln!("erro: {error}");
-        return 1;
+    while !interrupted() && engine.state() == PlayerState::Playing {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        engine.poll_finished();
     }
 
-    let stream = hogged.stream_format();
-    println!("exclusivo: sim (hog mode)");
-    println!("físico   : {}", describe_format(&physical));
-    println!(
-        "callback : {}{}",
-        describe_format(&stream),
-        if hogged.virtual_format_locked() {
-            " [travado igual ao físico]"
-        } else {
-            ""
-        }
-    );
-
-    if stream.mFormatID != kAudioFormatLinearPCM {
-        eprintln!("erro: o device não está em PCM linear; não vou alimentá-lo");
-        return 1;
-    }
-
-    // O decodificador entrega sempre intercalado, que é como o ring buffer guarda; o IOProc
-    // desintercala se o device pedir assim.
-    //
-    // O tamanho do frame vem do próprio device, nunca de bitsPerChannel/8: um formato pode
-    // carregar amostras de 24 bits em containers de 32, e recalcular assumindo empacotamento
-    // faria o decodificador produzir um passo e o IOProc ler outro — ruído branco, não música.
-    let non_interleaved = stream.mFormatFlags & kAudioFormatFlagIsNonInterleaved != 0;
-    let mut client = stream;
-    client.mFormatFlags &= !kAudioFormatFlagIsNonInterleaved;
-    client.mFramesPerPacket = 1;
-    client.mBytesPerFrame = if non_interleaved {
-        stream.mBytesPerFrame * stream.mChannelsPerFrame
-    } else {
-        stream.mBytesPerFrame
-    };
-    client.mBytesPerPacket = client.mBytesPerFrame;
-
-    let check = validate_interleaved_format(
-        client.mBitsPerChannel,
-        client.mBytesPerFrame,
-        client.mChannelsPerFrame,
-    );
-    if !check.ok {
-        eprintln!("erro: formato de entrega inconsistente: {}", check.reason);
-        return 1;
-    }
-
-    if let Err(error) = source.set_client_format(&client) {
-        eprintln!("erro: {error}");
-        return 1;
-    }
-
-    // O decodificador pode ajustar o que aceitou. Se o que ele vai entregar divergir do que
-    // o device espera, parar aqui é a diferença entre silêncio e ruído em volume total.
-    let effective = match source.effective_client_format() {
-        Ok(effective) => effective,
-        Err(error) => {
-            eprintln!("erro: {error}");
-            return 1;
-        }
-    };
-    if effective.mBitsPerChannel != client.mBitsPerChannel
-        || effective.mBytesPerFrame != client.mBytesPerFrame
-        || effective.mChannelsPerFrame != client.mChannelsPerFrame
-        || (effective.mFormatFlags & kAudioFormatFlagIsFloat)
-            != (client.mFormatFlags & kAudioFormatFlagIsFloat)
-        || (effective.mSampleRate - client.mSampleRate).abs() > 0.5
-    {
-        eprintln!(
-            "erro: o decodificador vai entregar {}, mas o device espera {}; \
-             reproduzir assim geraria ruído",
-            describe_format(&effective),
-            describe_format(&client)
-        );
-        return 1;
-    }
-
-    let ring_bytes = client.mSampleRate as usize * client.mBytesPerFrame as usize * 2;
-    let status = Arc::new(SharedStatus::new());
-    status.set_track(source.total_frames(), client.mSampleRate);
-    let playback = Arc::new(Playback::new(
-        ring_bytes,
-        &client,
-        non_interleaved,
-        Arc::clone(&status),
-    ));
-
-    let producer = {
-        let playback = Arc::clone(&playback);
-        let bytes_per_frame = client.mBytesPerFrame as usize;
-        std::thread::spawn(move || {
-            let mut chunk = vec![0u8; 64 * 1024];
-            let frames_per_chunk = (chunk.len() / bytes_per_frame) as u32;
-            while !interrupted() {
-                let got = source.read(&mut chunk, frames_per_chunk);
-                if got == 0 {
-                    break;
-                }
-                let bytes = got as usize * bytes_per_frame;
-                let mut written = 0usize;
-                while written < bytes && !interrupted() {
-                    written += playback.ring.write(&chunk[written..bytes]);
-                    if written < bytes {
-                        std::thread::sleep(std::time::Duration::from_millis(5));
-                    }
-                }
-            }
-            playback.producer_done.store(true, Ordering::Release);
-        })
-    };
-
-    let exit_code = match options.dump.as_ref() {
-        Some(path) => run_dump(&playback, &client, path),
-        None => run_playback(&mut hogged, &playback, seconds),
-    };
-
-    INTERRUPTED.store(1, Ordering::Relaxed); // desbloqueia a produtora
-    let _ = producer.join();
-
-    let underruns = status.underruns();
+    let by_user = interrupted();
+    let underruns = engine.status().underruns();
     if underruns > 0 {
         println!("aviso    : {underruns} falhas de alimentação do buffer");
     }
 
-    if let Err(error) = hogged.finish() {
+    if let Err(error) = engine.shutdown() {
         eprintln!(
             "aviso    : {error}\n\
              \x20          o device pode ter ficado com outra configuração; tocar\n\
@@ -448,13 +216,25 @@ fn run() -> i32 {
     }
 
     println!("fim      : device restaurado");
-    exit_code
+    if by_user {
+        130
+    } else {
+        0
+    }
 }
 
 /// Consome o ring exatamente como o IOProc faria, mas grava em disco. O pipeline é o mesmo —
 /// decodificador, ring buffer, alinhamento de frame — porque um atalho que apenas
 /// decodificasse pularia justamente as partes onde estiveram os bugs mais caros.
-fn run_dump(playback: &Arc<Playback>, client: &AudioStreamBasicDescription, path: &str) -> i32 {
+fn run_dump(engine: &Engine, path: &str) -> i32 {
+    let (playback, client) = match engine.start_offline() {
+        Ok(pair) => pair,
+        Err(error) => {
+            eprintln!("erro: {error}");
+            return 1;
+        }
+    };
+
     let mut file = match std::fs::File::create(path) {
         Ok(file) => file,
         Err(error) => {
@@ -489,39 +269,10 @@ fn run_dump(playback: &Arc<Playback>, client: &AudioStreamBasicDescription, path
     }
 
     println!("dump     : {frames_written} frames em {path}");
-    0
-}
 
-fn run_playback(hogged: &mut HoggedDevice, playback: &Arc<Playback>, seconds: f64) -> i32 {
-    // Deixa o buffer encher antes de abrir o fluxo, para o começo da faixa não sair picotado.
-    let half = playback.ring.capacity() / 2;
-    for _ in 0..200 {
-        if playback.ring.available_to_read() >= half
-            || playback.producer_done.load(Ordering::Acquire)
-            || interrupted()
-        {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(5));
-    }
-
-    let context = Arc::as_ptr(playback) as *mut std::ffi::c_void;
-    if let Err(error) = hogged.start(Some(io_proc), context) {
-        eprintln!("erro: {error}");
+    if let Err(error) = engine.shutdown() {
+        eprintln!("aviso    : {error}");
         return 1;
     }
-
-    println!("tocando  : {seconds:.1} s — Ctrl+C interrompe");
-
-    while !interrupted() && !playback.finished.load(Ordering::Acquire) {
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
-
-    let by_user = interrupted();
-    hogged.stop();
-    if by_user {
-        130 // 128 + SIGINT, como manda a convenção
-    } else {
-        0
-    }
+    0
 }

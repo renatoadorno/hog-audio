@@ -408,6 +408,26 @@ impl HoggedDevice {
         self.running = false;
     }
 
+    /// Retoma sem recriar o IOProc. Chamar `start` de novo registraria um callback adicional
+    /// e o anterior continuaria vivo, com os dois consumindo o mesmo ring buffer.
+    pub fn resume(&mut self) -> Result<(), String> {
+        if self.running {
+            return Ok(());
+        }
+        if self.proc_id.is_none() {
+            return Err("não há callback registrado para retomar".to_string());
+        }
+        let status = unsafe { AudioDeviceStart(self.device_id, self.proc_id) };
+        if status != 0 {
+            return Err(format!(
+                "não consegui retomar a reprodução: {}",
+                os_status_text(status)
+            ));
+        }
+        self.running = true;
+        Ok(())
+    }
+
     /// Devolve o device ao estado original agora, em vez de esperar o `Drop`, e informa o que
     /// falhou. Chamar de novo (ou pelo `Drop`) não repete o trabalho.
     pub fn finish(&mut self) -> Result<(), String> {
