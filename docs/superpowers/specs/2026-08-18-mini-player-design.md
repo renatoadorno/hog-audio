@@ -258,13 +258,21 @@ O Mac não fica mudo; fica configurado na frequência da última faixa.
   dump. A saída tem de ser byte-idêntica à do dump sem pause. Isso prova que o pause não
   descarta nem duplica bytes do ring, que é o risco concreto que ele introduz.
 
-### O que deliberadamente não é testado automaticamente
+- **Novo — independência de volume.** Dois dumps do mesmo arquivo, um com `--volume 20` e outro
+  com `--volume 90`, têm de ser byte-idênticos. O modo dump **adquire o device e aplica o
+  volume de verdade** antes de gravar — verificado —, então o teste não é vazio: ele reprova se
+  alguém algum dia implementar volume como ganho em software, no produtor ou no consumidor.
 
-Não haverá teste automatizado de "o volume não altera os bits". No modo dump o device nem chega
-a ser adquirido, então esse teste passaria sempre, independentemente do código — teste que não
-pode falhar não prova nada. A garantia aqui vem de duas coisas verificáveis por leitura e por
-medição já feita: o caminho de dados contém apenas `memcpy`, e neste hardware o volume é
-analógico.
+  Medido na linha de base atual: 4.608.000 bytes de cada lado, idênticos, e a comparação
+  detecta um único bit trocado. Um teste que não consegue reprovar não prova nada, então essa
+  checagem faz parte do teste.
+
+### O alcance da prova, e o que ela não cobre
+
+Nenhum teste automatizado alcança o caminho analógico: o que sai do amplificador para o fone
+não é observável por software. A afirmação de que o volume neste hardware é analógico vem de
+medição feita anteriormente no projeto, não destes testes. O que estes testes cobrem é tudo o
+que acontece até o byte entregue ao IOProc — que é onde moraram todos os bugs até hoje.
 
 ## Metadados
 
