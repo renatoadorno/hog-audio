@@ -11,6 +11,11 @@ public struct TrackMetadata: Equatable, Sendable {
 /// Um item de metadado já extraído do AVFoundation. A separação existe para que a regra de
 /// mapeamento seja testável sem arquivo nenhum.
 public struct MetadataItem: Sendable {
+    // `keySpace` é preservado mas o casamento abaixo usa só `key`: hoje não há colisão de
+    // nome entre `vorb`/`org.id3`/`itsk` (ver as tabelas de chaves logo abaixo), então
+    // qualificar por keySpace só complicaria a concatenação comum+cru. Se um dia duas
+    // keyspaces usarem a mesma chave para campos diferentes, isso vira um bug silencioso —
+    // é o preço combinado desta simplicidade.
     public let keySpace: String
     public let key: String
     public let stringValue: String?
@@ -53,12 +58,12 @@ public func trackMetadata(
     raw: [MetadataItem],
     fallbackFilename: String
 ) -> TrackMetadata {
-    let todos = common + raw
+    let combined = common + raw
     return TrackMetadata(
-        title: firstText(todos, titleKeys) ?? fallbackFilename,
-        artist: firstText(todos, artistKeys),
-        album: firstText(todos, albumKeys),
-        artwork: firstData(todos, artworkKeys)
+        title: firstText(combined, titleKeys) ?? fallbackFilename,
+        artist: firstText(combined, artistKeys),
+        album: firstText(combined, albumKeys),
+        artwork: firstData(combined, artworkKeys)
     )
 }
 
@@ -66,35 +71,35 @@ public func trackMetadata(
 /// arquivo.
 public func loadMetadata(from url: URL) async -> TrackMetadata {
     let asset = AVURLAsset(url: url)
-    let nome = url.deletingPathExtension().lastPathComponent
+    let name = url.deletingPathExtension().lastPathComponent
 
-    func converter(_ items: [AVMetadataItem]) async -> [MetadataItem] {
-        var resultado: [MetadataItem] = []
+    func convert(_ items: [AVMetadataItem]) async -> [MetadataItem] {
+        var result: [MetadataItem] = []
         for item in items {
-            let chave = item.commonKey?.rawValue
+            let rawKey = item.commonKey?.rawValue
                 ?? item.key.map { "\($0)" }
                 ?? item.identifier?.rawValue
                 ?? ""
-            let texto = try? await item.load(.stringValue)
-            let dados = try? await item.load(.dataValue)
-            resultado.append(MetadataItem(
+            let text = try? await item.load(.stringValue)
+            let data = try? await item.load(.dataValue)
+            result.append(MetadataItem(
                 keySpace: item.keySpace?.rawValue ?? "",
-                key: chave,
-                stringValue: texto ?? nil,
-                dataValue: dados ?? nil
+                key: rawKey,
+                stringValue: text ?? nil,
+                dataValue: data ?? nil
             ))
         }
-        return resultado
+        return result
     }
 
     guard let common = try? await asset.load(.commonMetadata),
           let raw = try? await asset.load(.metadata) else {
-        return TrackMetadata(title: nome, artist: nil, album: nil, artwork: nil)
+        return TrackMetadata(title: name, artist: nil, album: nil, artwork: nil)
     }
 
     return trackMetadata(
-        common: await converter(common),
-        raw: await converter(raw),
-        fallbackFilename: nome
+        common: await convert(common),
+        raw: await convert(raw),
+        fallbackFilename: name
     )
 }

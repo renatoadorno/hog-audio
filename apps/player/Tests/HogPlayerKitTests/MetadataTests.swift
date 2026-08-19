@@ -91,3 +91,39 @@ private func item(_ keySpace: String, _ key: String, _ value: String) -> Metadat
     #expect(meta.album == "Death of a Bachelor")
     #expect(meta.artwork == nil) // este arquivo não tem capa embutida, verificado com ffprobe
 }
+
+// As fixtures de M4A e MP3 abaixo cobrem o que os testes sintéticos de `org.id3`/`itsk`
+// não cobrem: a função `convert` que traduz `AVMetadataItem` de verdade. Elas não são
+// versionadas (mesma regra de `musicas/`) — para recriá-las:
+//
+//   ffmpeg -v error -y -f lavfi -i "sine=frequency=440:duration=2" \
+//     -i musicas/Skyfall.flac -map 0:a -map 1:v -c:a alac -c:v copy \
+//     -disposition:v attached_pic \
+//     -metadata title="Titulo Teste" -metadata artist="Artista Teste" \
+//     -metadata album="Album Teste" testdata/meta_fixture.m4a
+//
+//   ffmpeg -v error -y -f lavfi -i "sine=frequency=440:duration=2" \
+//     -i musicas/Skyfall.flac -map 0:a -map 1:v -c:a libmp3lame -c:v copy \
+//     -id3v2_version 3 \
+//     -metadata title="Titulo Teste" -metadata artist="Artista Teste" \
+//     -metadata album="Album Teste" testdata/meta_fixture.mp3
+
+@Test func leUmM4aRealComCapa() async {
+    let url = URL(fileURLWithPath: "../../testdata/meta_fixture.m4a")
+    guard FileManager.default.fileExists(atPath: url.path) else { return }
+    let meta = await loadMetadata(from: url)
+    #expect(meta.title == "Titulo Teste")
+    #expect(meta.artist == "Artista Teste")
+    #expect(meta.album == "Album Teste")
+    #expect(meta.artwork != nil)
+}
+
+@Test func leUmMp3RealComCapa() async {
+    let url = URL(fileURLWithPath: "../../testdata/meta_fixture.mp3")
+    guard FileManager.default.fileExists(atPath: url.path) else { return }
+    let meta = await loadMetadata(from: url)
+    #expect(meta.title == "Titulo Teste")
+    #expect(meta.artist == "Artista Teste")
+    #expect(meta.album == "Album Teste")
+    #expect(meta.artwork != nil)
+}
