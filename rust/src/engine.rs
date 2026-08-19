@@ -170,6 +170,11 @@ impl Engine {
         }
 
         let mut inner = self.lock();
+        // `teardown` só limpa os campos da faixa carregada; soltar o device é
+        // responsabilidade só de `stop_and_release`, chamada aqui explicitamente por quem
+        // precisa dela (o erro é descartado pelo mesmo motivo de sempre: uma restauração que
+        // falhou não pode impedir a carga de uma faixa nova).
+        let _ = self.stop_and_release(&mut inner);
         self.teardown(&mut inner);
 
         let device_name = device.name.clone();
@@ -207,7 +212,14 @@ impl Engine {
                     .ok_or_else(|| "pausado sem device; recarregue a faixa".to_string())?;
                 hogged.resume()?;
             }
-            _ => self.start_common(&mut inner, true)?,
+            PlayerState::Loaded | PlayerState::Finished => self.start_common(&mut inner, true)?,
+            // O `next_state` acima já teria retornado erro para Play a partir de Idle ou
+            // Failed. Um wildcard aqui esconderia uma variante nova de `PlayerState` caindo
+            // silenciosamente em `start_common`; exaustivo, o compilador força revisar este
+            // match a cada variante adicionada.
+            PlayerState::Idle | PlayerState::Failed => {
+                unreachable!("next_state já filtrou Play a partir de {:?}", inner.state)
+            }
         }
 
         inner.state = target;
@@ -286,6 +298,14 @@ impl Engine {
     }
 
     fn start_common(&self, inner: &mut EngineInner, attach_io_proc: bool) -> Result<(), String> {
+        // Incondicional, mesmo vindo de Loaded (onde nada está retido — vira no-op). De
+        // Finished ou Paused-sem-resume-possível, um HoggedDevice antigo pode continuar
+        // registrado: criar um segundo aqui sobreporia hog/rate/formato por cima do que a
+        // acquire() nova ainda vai gravar como "original", e o Drop do antigo revogaria hog
+        // mode e reverteria rate/formato por baixo de uma sessão que se acredita exclusiva —
+        // tudo retornando noErr, sem nenhum sinal de erro.
+        let _ = self.stop_and_release(inner);
+
         // Recarrega do início: vindo de Finished o decodificador já se esgotou, e mesmo
         // vindo de Loaded é preciso um AudioSource que possa ser movido para a produtora.
         let path = inner
@@ -312,9 +332,10 @@ impl Engine {
         hogged.acquire(device, decision.sample_rate, &physical)?;
 
         // Com o device já nosso e antes de qualquer amostra sair: é o único ponto em que dá
-        // para garantir que o fone não receba o volume anterior.
+        // para garantir que o fone não receba o volume anterior. A publicação no
+        // `SharedStatus` fica para o fim da função — ver o comentário perto de
+        // `self.status.set_volume` mais abaixo.
         let outcome = apply_volume(&mut hogged, device, inner.volume.as_ref(), inner.ceiling)?;
-        self.status.set_volume(outcome.scalar);
 
         let stream = hogged.stream_format();
         if stream.mFormatID != coreaudio_sys::kAudioFormatLinearPCM {
@@ -392,10 +413,27 @@ impl Engine {
         // percorre decodificador, ring buffer e alinhamento de frame, que é onde estiveram os
         // bugs mais caros. Um atalho que apenas decodificasse não provaria nada disso.
         if attach_io_proc {
+            // SAFETY: o io_proc desreferencia este ponteiro cru, sem contagem de referência, a
+            // cada callback de tempo real do Core Audio. O invariante que sustenta isso: ao
+            // menos um `Arc<Playback>` fica vivo enquanto o callback puder disparar.
+            // `stop_and_release` garante a ordem inversa na saída — chama `hogged.stop()`
+            // (nenhum callback novo depois disso) e só então junta a produtora e zera
+            // `inner.playback`, então o ponteiro nunca é lido depois do `Arc` cair.
             let context = Arc::as_ptr(&playback) as *mut std::ffi::c_void;
-            hogged.start(Some(crate::playback::io_proc), context)?;
+            if let Err(error) = hogged.start(Some(crate::playback::io_proc), context) {
+                // A produtora e o pré-buffer já rodaram; sem isto, ninguém mais teria a flag
+                // `stop` para sinalizar parada, e a thread giraria para sempre enchendo um
+                // ring buffer que nenhum consumidor vai esvaziar.
+                stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                let _ = producer.join();
+                return Err(error);
+            }
         }
 
+        // Só agora nada mais nesta função pode falhar e derrubar o `HoggedDevice` local (cujo
+        // `Drop` reverteria o volume no hardware) — publicar antes deixaria o status
+        // mostrando um volume que o device já não tem mais caso alguma checagem acima falhe.
+        self.status.set_volume(outcome.scalar);
         inner.volume_outcome = Some(outcome);
         inner.client = Some(client);
         inner.hogged = Some(hogged);
@@ -442,10 +480,10 @@ impl Engine {
         restore
     }
 
-    /// Descarta o que estiver carregado, para o resto das threads e devolve o device, se
-    /// estiver com a gente.
+    /// Descarta os campos da faixa carregada. Não toca no device: quem chama decide se e
+    /// quando soltar o hardware, chamando `stop_and_release` — uma única responsável em vez
+    /// de duas funções que precisam ser lidas juntas para confirmar que é seguro.
     fn teardown(&self, inner: &mut EngineInner) {
-        let _ = self.stop_and_release(inner);
         inner.source = None;
         inner.decision = None;
         inner.device = None;
@@ -752,6 +790,52 @@ mod tests {
         );
 
         engine.shutdown().expect("deveria restaurar o device");
+        assert_eq!(engine.state(), PlayerState::Idle);
+    }
+
+    #[test]
+    #[ignore = "precisa de um device de saída real; toma o device por alguns segundos"]
+    fn tocar_de_novo_apos_o_fim_nao_duplica_a_posse_do_device() {
+        let path = "../testdata/t44_16.flac";
+        if !std::path::Path::new(path).exists() {
+            eprintln!("pulando: {path} não existe (gere com ffmpeg)");
+            return;
+        }
+        let engine = Engine::new();
+        engine.load(path).expect("deveria carregar");
+
+        engine.play().expect("deveria tocar a primeira vez");
+        assert_eq!(engine.state(), PlayerState::Playing);
+
+        // Força o fim sem esperar a faixa inteira: é a mesma flag que o IOProc real marca
+        // (`playback.rs`, quando a produtora terminou e o ring esvaziou), então
+        // `poll_finished` segue exatamente o caminho de um fim de faixa de verdade — inclusive
+        // deixando `inner.hogged`/`playback`/`producer` retidos, que é o estado que expõe o
+        // bug: um segundo `play()` aqui criava um `HoggedDevice` novo sobre o antigo ainda
+        // vivo.
+        {
+            let inner = engine.lock();
+            inner
+                .playback
+                .as_ref()
+                .expect("deveria ter playback depois de tocar")
+                .finished
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+        engine.poll_finished();
+        assert_eq!(engine.state(), PlayerState::Finished);
+
+        engine
+            .play()
+            .expect("a segunda reprodução deveria funcionar depois do fim da primeira");
+        assert_eq!(engine.state(), PlayerState::Playing);
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        assert!(
+            engine.status().elapsed_seconds() > 0.0,
+            "o tempo decorrido deveria avançar na segunda reprodução"
+        );
+
+        engine.shutdown().expect("deveria restaurar o device depois da segunda reprodução");
         assert_eq!(engine.state(), PlayerState::Idle);
     }
 }
