@@ -137,3 +137,176 @@ impl Playback {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `AudioBufferList` é de tamanho variável: a struct gerada declara só
+    /// `mBuffers: [AudioBuffer; 1]`, mas o layout real do Core Audio tem `mNumberBuffers`
+    /// elementos contíguos. `Vec<u64>` garante alinhamento de 8 bytes — o que a struct exige
+    /// por causa do ponteiro em `AudioBuffer` — sem depender de quanto o alocador de `u8`
+    /// decide alinhar na prática.
+    struct SyntheticBufferList {
+        storage: Vec<u64>,
+    }
+
+    impl SyntheticBufferList {
+        fn new(buffers: &[AudioBuffer]) -> Self {
+            let bytes = std::mem::size_of::<AudioBufferList>()
+                + buffers.len().saturating_sub(1) * std::mem::size_of::<AudioBuffer>();
+            let mut storage = vec![0u64; bytes.div_ceil(std::mem::size_of::<u64>())];
+            let list = storage.as_mut_ptr() as *mut AudioBufferList;
+            unsafe {
+                (*list).mNumberBuffers = buffers.len() as UInt32;
+                let first = std::ptr::addr_of_mut!((*list).mBuffers) as *mut AudioBuffer;
+                for (i, b) in buffers.iter().enumerate() {
+                    first.add(i).write(*b);
+                }
+            }
+            Self { storage }
+        }
+
+        fn as_mut_ptr(&mut self) -> *mut AudioBufferList {
+            self.storage.as_mut_ptr() as *mut AudioBufferList
+        }
+    }
+
+    /// Um `AudioBuffer` apontando para memória que o teste possui e pode inspecionar depois
+    /// do callback rodar.
+    fn buffer(data: &mut [u8]) -> AudioBuffer {
+        AudioBuffer {
+            mNumberChannels: 1,
+            mDataByteSize: data.len() as UInt32,
+            mData: data.as_mut_ptr() as *mut std::ffi::c_void,
+        }
+    }
+
+    /// Formato de cliente mínimo para os testes: `bytes_per_sample` sempre inteiro para não
+    /// obscurecer a aritmética de offset que os testes de desintercalação verificam.
+    fn client_format(bytes_per_frame: u32, channels: u32) -> AudioStreamBasicDescription {
+        AudioStreamBasicDescription {
+            mSampleRate: 100.0,
+            mFormatID: 0,
+            mFormatFlags: 0,
+            mBytesPerPacket: bytes_per_frame,
+            mFramesPerPacket: 1,
+            mBytesPerFrame: bytes_per_frame,
+            mChannelsPerFrame: channels,
+            mBitsPerChannel: (bytes_per_frame / channels) * 8,
+            mReserved: 0,
+        }
+    }
+
+    /// Chama o callback fora do Core Audio, como a thread de tempo real chamaria — só que com
+    /// um `AudioBufferList` sintético em vez de um device de verdade.
+    fn call_io_proc(playback: &Playback, list: *mut AudioBufferList) {
+        unsafe {
+            io_proc(
+                0,
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                list,
+                std::ptr::null(),
+                playback as *const Playback as *mut std::ffi::c_void,
+            );
+        }
+    }
+
+    #[test]
+    fn ramo_intercalado_entrega_bytes_do_ring_e_conta_frames_pedidos() {
+        let status = Arc::new(SharedStatus::new());
+        status.set_track(1_000, 100.0);
+        let client = client_format(4, 2);
+        let playback = Playback::new(64, &client, false, Arc::clone(&status));
+
+        let pattern: Vec<u8> = (0u8..32).collect(); // 8 frames de 4 bytes, ring cheio o bastante
+        assert_eq!(playback.ring.write(&pattern), pattern.len());
+
+        let mut out = vec![0xAAu8; pattern.len()];
+        let mut list = SyntheticBufferList::new(&[buffer(&mut out)]);
+        call_io_proc(&playback, list.as_mut_ptr());
+
+        assert_eq!(out, pattern);
+        // 8 frames pedidos a 100 Hz: o decorrido segue o que foi pedido, não o que foi lido.
+        assert!((status.elapsed_seconds() - 0.08).abs() < 1e-9);
+    }
+
+    #[test]
+    fn ramo_intercalado_preenche_silencio_no_underrun_e_conta_a_falha() {
+        let status = Arc::new(SharedStatus::new());
+        let client = client_format(4, 2);
+        let playback = Playback::new(64, &client, false, Arc::clone(&status));
+
+        let pattern: Vec<u8> = (0u8..8).collect(); // só 2 frames disponíveis
+        assert_eq!(playback.ring.write(&pattern), pattern.len());
+
+        // Sentinela não-zero: distingue "escreveu silêncio" de "não escreveu nada".
+        let mut out = vec![0xFFu8; 32]; // device pede 8 frames
+        let mut list = SyntheticBufferList::new(&[buffer(&mut out)]);
+        call_io_proc(&playback, list.as_mut_ptr());
+
+        assert_eq!(&out[..8], &pattern[..]);
+        assert!(out[8..].iter().all(|&b| b == 0));
+        assert_eq!(status.underruns(), 1);
+        assert!(!playback.finished.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn ramo_intercalado_marca_fim_sem_contar_underrun_quando_produtora_terminou() {
+        let status = Arc::new(SharedStatus::new());
+        let client = client_format(4, 2);
+        let playback = Playback::new(64, &client, false, Arc::clone(&status));
+        playback.producer_done.store(true, Ordering::Release);
+        // ring vazio de propósito: é o fim real da faixa, não uma falha de alimentação
+
+        let mut out = vec![0xFFu8; 32];
+        let mut list = SyntheticBufferList::new(&[buffer(&mut out)]);
+        call_io_proc(&playback, list.as_mut_ptr());
+
+        assert!(out.iter().all(|&b| b == 0));
+        assert!(playback.finished.load(Ordering::Acquire));
+        assert_eq!(status.underruns(), 0);
+    }
+
+    #[test]
+    fn ramo_nao_intercalado_desintercala_lr_para_buffers_separados() {
+        let status = Arc::new(SharedStatus::new());
+        let client = client_format(2, 2); // 1 byte por amostra, só para simplificar a aritmética
+        let playback = Playback::new(64, &client, true, Arc::clone(&status));
+
+        // LRLRLR..., 4 frames: L = 10,11,12,13 / R = 20,21,22,23
+        let interleaved = [10u8, 20, 11, 21, 12, 22, 13, 23];
+        assert_eq!(playback.ring.write(&interleaved), interleaved.len());
+
+        let mut left = vec![0xFFu8; 4];
+        let mut right = vec![0xFFu8; 4];
+        let mut list = SyntheticBufferList::new(&[buffer(&mut left), buffer(&mut right)]);
+        call_io_proc(&playback, list.as_mut_ptr());
+
+        assert_eq!(left, vec![10, 11, 12, 13]);
+        assert_eq!(right, vec![20, 21, 22, 23]);
+    }
+
+    #[test]
+    fn ramo_nao_intercalado_zera_buffers_alem_dos_canais_existentes() {
+        let status = Arc::new(SharedStatus::new());
+        let client = client_format(2, 2); // 2 canais
+        let playback = Playback::new(64, &client, true, Arc::clone(&status));
+
+        let interleaved = [10u8, 20, 11, 21, 12, 22, 13, 23];
+        assert_eq!(playback.ring.write(&interleaved), interleaved.len());
+
+        let mut left = vec![0xFFu8; 4];
+        let mut right = vec![0xFFu8; 4];
+        let mut extra = vec![0xEEu8; 4]; // device pediu 3 buffers, só há 2 canais
+        let mut list =
+            SyntheticBufferList::new(&[buffer(&mut left), buffer(&mut right), buffer(&mut extra)]);
+        call_io_proc(&playback, list.as_mut_ptr());
+
+        assert_eq!(left, vec![10, 11, 12, 13]);
+        assert_eq!(right, vec![20, 21, 22, 23]);
+        assert_eq!(extra, vec![0, 0, 0, 0]);
+    }
+}
