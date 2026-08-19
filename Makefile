@@ -1,8 +1,11 @@
 # Orquestra as duas implementações e a comparação entre elas.
 CPP_BUILD := cpp/build
 RUST_BIN  := rust/target/release/hog-audio
+RUST_LIB  := rust/target/release/libhog_audio.a
+FFI_DIR   := apps/player/Sources/HogAudioFFI
+BIND_DIR  := apps/player/Sources/HogAudioBindings
 
-.PHONY: all cpp cpp-test cpp-asan rust rust-test test verify verify-pause verify-volume info play clean
+.PHONY: all cpp cpp-test cpp-asan rust rust-test rust-lib bindings test verify verify-pause verify-volume info play clean
 
 all: cpp rust
 
@@ -25,6 +28,21 @@ rust:
 
 rust-test:
 	@cd rust && cargo test
+
+rust-lib:
+	@cd rust && cargo build --release
+
+# Os bindings sao gerados a partir da staticlib, entao o .app nao precisa embarcar dylib.
+bindings: rust-lib
+	@mkdir -p $(FFI_DIR)/include $(BIND_DIR)
+	@cd rust && cargo run -q --release --bin uniffi-bindgen -- \
+	  generate --library target/release/libhog_audio.a \
+	  --language swift --out-dir /tmp/hog_bindings
+	@cp /tmp/hog_bindings/hog_audioFFI.h $(FFI_DIR)/include/
+	@cp /tmp/hog_bindings/hog_audioFFI.modulemap $(FFI_DIR)/include/module.modulemap
+	@cp /tmp/hog_bindings/hog_audio.swift $(BIND_DIR)/
+	@echo '// um alvo C do SPM exige ao menos um arquivo-fonte' > $(FFI_DIR)/empty.c
+	@echo "bindings gerados em $(FFI_DIR) e $(BIND_DIR)"
 
 test: cpp-test rust-test
 

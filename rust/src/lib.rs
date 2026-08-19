@@ -2,6 +2,9 @@
 //! device em modo exclusivo. Tanto a CLI quanto a interface gráfica consomem esta
 //! biblioteca; nenhuma das duas fala com o Core Audio diretamente.
 
+uniffi::setup_scaffolding!();
+
+pub mod api;
 pub mod device;
 pub mod engine;
 pub mod ffi;

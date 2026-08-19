@@ -12,5 +12,10 @@ path = "src/lib.rs"
 name = "hog-audio"
 path = "src/main.rs"
 
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+
 [dependencies]
 coreaudio-sys = "0.2.18"
+uniffi = { version = "0.32", features = ["cli"] }

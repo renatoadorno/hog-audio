@@ -6,6 +6,10 @@ build-asan/
 compile_commands.json
 .DS_Store
 .cache/
+apps/player/Sources/HogAudioFFI/
+apps/player/Sources/HogAudioBindings/
+apps/player/.build/
+apps/player/HogAudio.app/
 
 # arquivos de áudio de teste e de uso
 *.flac

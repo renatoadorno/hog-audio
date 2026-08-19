@@ -2,7 +2,7 @@
 //! Manter estas regras puras é o que torna possível cobrir todos os pares estado × comando
 //! sem device, sem arquivo e sem thread.
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum PlayerState {
     Idle,
     Loaded,
