@@ -25,6 +25,13 @@ final class FakePlayer: HogPlayerProtocol, @unchecked Sendable {
     // a ordem real de chegada das duas `Task.detached` não é determinística.
     var atrasoDeCarga: TimeInterval = 0
     var caminhoComAtraso: String?
+    // Mesma ideia para `setVolume`: o atraso é amarrado ao escalar pedido (capturado por
+    // closure no instante do `applyVolume()`), não a um contador de chamadas — identifica a
+    // requisição certa independente de qual `Task.detached` chega primeiro no dublê. 0.25 e
+    // 0.75 são frações binárias exatas: `Float` e `Double` concordam bit a bit, então a
+    // comparação abaixo não sofre de arredondamento.
+    var atrasoDeVolume: TimeInterval = 0
+    var escalarComAtraso: Float?
 
     func load(path: String) throws -> TrackFormat {
         if path == caminhoComAtraso, atrasoDeCarga > 0 {
@@ -45,6 +52,9 @@ final class FakePlayer: HogPlayerProtocol, @unchecked Sendable {
         chamadas.append("pause"); estado = .paused
     }
     func setVolume(scalar: Float) throws {
+        if scalar == escalarComAtraso, atrasoDeVolume > 0 {
+            Thread.sleep(forTimeInterval: atrasoDeVolume)
+        }
         lock.lock(); defer { lock.unlock() }
         if let falha = falhaAoAplicarVolume { throw falha }
         volumeAplicado = scalar
@@ -114,6 +124,29 @@ final class FakePlayer: HogPlayerProtocol, @unchecked Sendable {
     // O slider não pode continuar exibindo 0.9: o device ficou em 0.5, e é isso que o
     // snapshot — a fonte confiável — reporta.
     #expect(model.volume == 0.5)
+}
+
+@Test @MainActor func chamadasConsecutivasDeVolumeAplicamAUltimaPedida() async {
+    let fake = FakePlayer()
+    let model = PlayerViewModel(player: fake)
+
+    // A primeira chamada "demora" a chegar ao hardware (como um `setVolume` real disputando o
+    // mutex que um `play()` segura na aquisição do hog); a segunda é instantânea. Sem
+    // encadear `pendingCommand`, a segunda venceria a corrida e o valor antigo chegaria por
+    // cima logo depois, em silêncio — exatamente o defeito que o encadeamento fecha.
+    fake.escalarComAtraso = 0.25
+    fake.atrasoDeVolume = 0.15
+
+    model.applyVolume(0.25)
+    let primeira = model.pendingCommand
+
+    model.applyVolume(0.75)
+    let segunda = model.pendingCommand
+
+    await segunda?.value
+    await primeira?.value
+
+    #expect(fake.volumeAplicado == 0.75)
 }
 
 @Test @MainActor func erroDeVolumeSomeDepoisDeUmComandoBemSucedido() async {

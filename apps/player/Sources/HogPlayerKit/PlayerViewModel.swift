@@ -17,6 +17,12 @@ public final class PlayerViewModel: ObservableObject {
     /// A task do último comando emitido. Existe para que quem precise saber quando o comando
     /// terminou possa aguardá-la, em vez de adivinhar por tempo — e para que dois comandos
     /// consecutivos sejam observáveis em ordem.
+    ///
+    /// Guardar a task aqui não implica esperar por ela: cada método decide, no próprio corpo,
+    /// se encadeia na `pendingCommand` anterior (preserva ordem de chegada ao hardware, ao
+    /// custo de atraso) ou se sobrescreve (responde na hora, aceitando que o resultado antigo
+    /// pode chegar depois — só é seguro quando algo mais garante que o atrasado não vence).
+    /// Ver `applyVolume()`, `toggle()` e `open()` para o porquê de cada escolha.
     public private(set) var pendingCommand: Task<Void, Never>?
 
     private let player: any HogPlayerProtocol
@@ -79,6 +85,13 @@ public final class PlayerViewModel: ObservableObject {
         // `load` pode fazer `stop_and_release`, que junta a thread produtora e espera o
         // hardware confirmar a troca de rate — até 2 s. Bloquear a main actor por isso
         // travaria a janela inteira; o trabalho roda fora dela, como em `toggle()`.
+        //
+        // Sobrescreve `pendingCommand` em vez de encadear no anterior — de propósito, ao
+        // contrário de `applyVolume()`. Encadear faria uma segunda abertura esperar até 2 s
+        // pela primeira antes sequer de começar a carregar, e essa espera não protegeria nada:
+        // quem já resolve "que faixa mais nova sobrescreve mais antiga aqui" é o `guard
+        // generation == openGeneration` abaixo, que descarta o resultado atrasado sem atrasar
+        // o trabalho novo. Encadear seria pura perda de responsividade.
         pendingCommand = Task {
             do {
                 let loaded = try await Task.detached { [player] in
@@ -116,6 +129,13 @@ public final class PlayerViewModel: ObservableObject {
         // para tocar `self` de volta ao fim, sem violar o checking estrito de Swift 6.
         // Guardada em `pendingCommand` para que o comando seja observável sem depender de
         // relógio: quem precisar saber quando terminou aguarda a task, não um `sleep`.
+        //
+        // Sobrescreve em vez de encadear — ao contrário de `applyVolume()` — porque `play()` e
+        // `pause()` carregam guarda de estado do próprio lado Rust: um pedido que não faz
+        // sentido na ordem em que chegou (`PlayFailure::State`, ver `rust/src/api.rs`) falha
+        // alto, tipado, e aparece em `errorMessage`. `set_volume` não tem essa guarda — aceita
+        // qualquer escalar em qualquer ordem, silenciosamente — e é isso que torna o
+        // encadeamento indispensável lá e dispensável aqui.
         pendingCommand = Task {
             do {
                 try await Task.detached { [player] in
@@ -146,7 +166,18 @@ public final class PlayerViewModel: ObservableObject {
         // O volume é a única coisa nesta interface que mexe em quanto sinal chega ao fone —
         // falhar calado aqui, como o shutdown, deixaria o usuário sem saber que o device não
         // mudou de verdade.
+        //
+        // O `Slider` chama isto continuamente durante o arrasto, não só ao soltar — tirar o
+        // trabalho da main actor removeu de graça a serialização que ela dava, e nada a
+        // substituiu: sem encadear, cada chamada dispara uma `Task.detached` independente, e
+        // nada garante que cheguem ao hardware na ordem em que o usuário pediu (o mutex do
+        // lado Rust serializa exclusão mútua, não ordem de chegada — ao contrário de
+        // `play()`/`pause()`, `set_volume` não tem guarda de estado que reprove um pedido fora
+        // de ordem). Encadear na `pendingCommand` anterior preserva a ordem sem voltar a
+        // bloquear a main actor: a task só chama o engine depois que a anterior terminou.
+        let previous = pendingCommand
         pendingCommand = Task {
+            await previous?.value
             do {
                 try await Task.detached { [player] in
                     try player.setVolume(scalar: Float(scalar))
