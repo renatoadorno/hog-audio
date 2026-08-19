@@ -250,7 +250,7 @@ mod tests {
         assert_eq!(status.underruns(), 1);
         assert!(!playback.finished.load(Ordering::Acquire));
         // need (8 frames pedidos) != got (2 frames lidos) de propósito: só assim a contagem
-        // provar que segue o pedido, e não o lido, tem como reprovar sob mutação.
+        // consegue provar que segue o pedido, e não o lido, tem como reprovar sob mutação.
         assert!((status.elapsed_seconds() - 0.08).abs() < 1e-9);
     }
 
@@ -323,6 +323,7 @@ mod tests {
     #[test]
     fn ramo_nao_intercalado_preenche_silencio_no_underrun_e_conta_a_falha() {
         let status = Arc::new(SharedStatus::new());
+        status.set_track(1_000, 100.0);
         let client = client_format(4, 2);
         let playback = Playback::new(64, &client, true, Arc::clone(&status));
 
@@ -340,6 +341,9 @@ mod tests {
         assert_eq!(right, vec![0x20, 0x21, 0x22, 0x23, 0, 0, 0, 0]);
         assert_eq!(status.underruns(), 1);
         assert!(!playback.finished.load(Ordering::Acquire));
+        // need (4 frames pedidos) != got (2 frames lidos) de propósito: só assim a contagem
+        // consegue provar que segue o pedido, e não o lido, tem como reprovar sob mutação.
+        assert!((status.elapsed_seconds() - 0.04).abs() < 1e-9);
     }
 
     #[test]
