@@ -49,11 +49,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // `make run-app` — o loop de desenvolvimento documentado no README — roda o binário em
     // primeiro plano, preso ao terminal: Ctrl+C manda SIGINT direto ao processo, sem passar
-    // por `applicationWillTerminate`. O mesmo vale para SIGTERM e para SIGHUP (fechar a
-    // janela do terminal). A CLI deste projeto já protege os mesmos sinais; a interface não
-    // podia chegar menos protegida que o binário que ela substitui.
+    // por `applicationWillTerminate`. O mesmo vale para SIGTERM, para SIGHUP (fechar a janela
+    // do terminal) e para SIGQUIT (Ctrl+\). A CLI deste projeto já protege os mesmos quatro
+    // sinais; a interface não podia chegar menos protegida que o binário que ela substitui.
     private func installSignalHandlers() {
-        for sig in [SIGINT, SIGTERM, SIGHUP] {
+        for sig in [SIGINT, SIGTERM, SIGHUP, SIGQUIT] {
             // Descarta a disposição default do sinal: sem isto o processo morre antes de o
             // `DispatchSource` abaixo ter qualquer chance de rodar.
             signal(sig, SIG_IGN)
