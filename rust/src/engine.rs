@@ -55,6 +55,24 @@ pub struct DeviceReport {
     pub duplicate_mono_to_stereo: bool,
 }
 
+/// Origem de uma falha de `play`: transição de estado inválida (o usuário precisa mudar o que
+/// pediu — recarregar, por exemplo) ou falha ao tomar/reconfigurar o hardware. A CLI não
+/// precisa da distinção (`play` achata as duas em `String`), mas a fronteira uniffi ramifica
+/// sobre isso — daí `pub(crate)` em vez de inflar a API pública do `Engine` com um tipo de
+/// erro novo só para quem está do outro lado do FFI.
+pub(crate) enum PlayFailure {
+    State(String),
+    Device(String),
+}
+
+impl PlayFailure {
+    fn into_message(self) -> String {
+        match self {
+            PlayFailure::State(message) | PlayFailure::Device(message) => message,
+        }
+    }
+}
+
 pub struct Engine {
     status: Arc<SharedStatus>,
     inner: Mutex<EngineInner>,
@@ -200,19 +218,31 @@ impl Engine {
     }
 
     pub fn play(&self) -> Result<(), String> {
+        self.play_classified().map_err(PlayFailure::into_message)
+    }
+
+    /// Mesma lógica de `play`, mas preserva se a falha veio da transição de estado ou do
+    /// hardware — ver o comentário em `PlayFailure` para o porquê de existir separado de
+    /// `play`.
+    pub(crate) fn play_classified(&self) -> Result<(), PlayFailure> {
         let mut inner = self.lock();
-        let target = next_state(inner.state, Command::Play).map_err(|e| e.message.to_string())?;
+        let target = next_state(inner.state, Command::Play)
+            .map_err(|e| PlayFailure::State(e.message.to_string()))?;
 
         match inner.state {
             PlayerState::Playing => return Ok(()), // idempotente: duplo clique no botão
             PlayerState::Paused => {
-                let hogged = inner
-                    .hogged
-                    .as_mut()
-                    .ok_or_else(|| "pausado sem device; recarregue a faixa".to_string())?;
-                hogged.resume()?;
+                // O device já deveria estar retido neste estado; sem ele, o problema não é o
+                // hardware ter recusado algo, é o player estar num estado que ele mesmo não
+                // sabe mais resolver — por isso `State`, não `Device`.
+                let hogged = inner.hogged.as_mut().ok_or_else(|| {
+                    PlayFailure::State("pausado sem device; recarregue a faixa".to_string())
+                })?;
+                hogged.resume().map_err(PlayFailure::Device)?;
             }
-            PlayerState::Loaded | PlayerState::Finished => self.start_common(&mut inner, true)?,
+            PlayerState::Loaded | PlayerState::Finished => self
+                .start_common(&mut inner, true)
+                .map_err(PlayFailure::Device)?,
             // O `next_state` acima já teria retornado erro para Play a partir de Idle ou
             // Failed. Um wildcard aqui esconderia uma variante nova de `PlayerState` caindo
             // silenciosamente em `start_common`; exaustivo, o compilador força revisar este

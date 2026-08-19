@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use crate::engine::Engine;
+use crate::engine::{Engine, PlayFailure};
 use crate::transitions::PlayerState;
 use crate::volume::{parse_volume, VolumeRequest, VolumeUnit};
 
@@ -52,6 +52,8 @@ pub struct HogPlayer {
 
 #[uniffi::export]
 impl HogPlayer {
+    /// Cria um player novo, em repouso (`Idle`) e sem device nenhum tomado — só `load` toca no
+    /// hardware.
     #[uniffi::constructor]
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
@@ -59,6 +61,9 @@ impl HogPlayer {
         })
     }
 
+    /// Decodifica o cabeçalho e negocia o formato com o device padrão, sem tocar nada ainda —
+    /// isso fica a cargo de `play`. Um caminho inválido ou uma negociação recusada não mudam o
+    /// que já estava carregado antes.
     pub fn load(&self, path: String) -> Result<TrackFormat, PlayerError> {
         let track = self
             .engine
@@ -74,18 +79,29 @@ impl HogPlayer {
         })
     }
 
+    /// Começa ou retoma a reprodução. As duas causas de falha chegam com tipos diferentes de
+    /// propósito: `PlayerError::State` quando o pedido não faz sentido no estado atual (nada
+    /// carregado, ou uma falha anterior que só se resolve recarregando) — nada que reter o
+    /// hardware; `PlayerError::Device` quando o device recusou ou não respondeu.
     pub fn play(&self) -> Result<(), PlayerError> {
-        self.engine
-            .play()
-            .map_err(|message| PlayerError::Device { message })
+        self.engine.play_classified().map_err(|failure| match failure {
+            PlayFailure::State(message) => PlayerError::State { message },
+            PlayFailure::Device(message) => PlayerError::Device { message },
+        })
     }
 
+    /// Suspende a reprodução sem soltar o device — retomar depois com `play` é rápido porque o
+    /// hog mode continua ativo. Só existe uma causa de falha aqui, a transição de estado, então
+    /// chega sempre como `PlayerError::State`.
     pub fn pause(&self) -> Result<(), PlayerError> {
         self.engine
             .pause()
             .map_err(|message| PlayerError::State { message })
     }
 
+    /// Aplica o volume direto no device, nunca em software sobre as amostras — é assim que a
+    /// reprodução continua bit-perfect. `scalar` é grampeado em 0..1 antes de chegar ao
+    /// hardware, então o Swift não precisa validar o próprio input.
     pub fn set_volume(&self, scalar: f32) -> Result<(), PlayerError> {
         let scalar = scalar.clamp(0.0, 1.0);
         self.engine
@@ -108,8 +124,13 @@ impl HogPlayer {
         }
     }
 
-    pub fn shutdown(&self) {
-        let _ = self.engine.shutdown();
+    /// Solta o device e devolve-o ao estado original — sample rate, formato e volume. Propaga
+    /// a falha de restauração em vez de engolir: sem isso o app fecharia e o Mac podia ficar
+    /// com outro sample rate sem ninguém saber.
+    pub fn shutdown(&self) -> Result<(), PlayerError> {
+        self.engine
+            .shutdown()
+            .map_err(|message| PlayerError::Device { message })
     }
 }
 
