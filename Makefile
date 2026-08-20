@@ -1,45 +1,39 @@
-# Orquestra as duas implementações e a comparação entre elas.
-CPP_BUILD := cpp/build
+# Orquestra o core Rust, o app Swift e as provas de bit-perfect.
 RUST_BIN  := rust/target/release/hog-audio
-RUST_LIB  := rust/target/release/libhog_audio.a
 FFI_DIR   := apps/player/Sources/HogAudioFFI
 BIND_DIR  := apps/player/Sources/HogAudioBindings
 APP_DIR   := apps/player/HogAudio.app
 
-.PHONY: all cpp cpp-test cpp-asan rust rust-test hw-test rust-lib bindings swift-test test icon verify verify-pause verify-volume info play app run-app clean
+.PHONY: all rust fmt fmt-check lint rust-test hw-test bindings swift-test test fixtures \
+        icon verify verify-pause verify-volume info play app run-app clean
 
-all: cpp rust
-
-cpp:
-	@cmake -B $(CPP_BUILD) -S cpp -DCMAKE_BUILD_TYPE=Release >/dev/null
-	@MAKEFLAGS= cmake --build $(CPP_BUILD)
-
-cpp-test: cpp
-	@ctest --test-dir $(CPP_BUILD) --output-on-failure
-
-# Os mesmos testes sob AddressSanitizer e UBSan: o ring buffer roda em thread de tempo
-# real, e um transbordo ali corrompe memória sem que os asserts percebam.
-cpp-asan:
-	@cmake -B cpp/build-asan -S cpp -DCMAKE_BUILD_TYPE=Debug -DHOG_SANITIZE=ON >/dev/null
-	@MAKEFLAGS= cmake --build cpp/build-asan
-	@ctest --test-dir cpp/build-asan --output-on-failure
+all: rust
 
 rust:
 	@cd rust && cargo build --release
 
+# Formatação e clippy são gate, não sugestão. O `unsafe` do HAL e do IOProc é onde moram os
+# defeitos caros deste projeto, e o clippy é a única ferramenta que os lê antes do usuário
+# ouvir o resultado — `not_unsafe_ptr_arg_deref` existe exatamente para esta classe de código.
+fmt:
+	@cd rust && cargo fmt
+
+fmt-check:
+	@cd rust && cargo fmt --check
+
+lint:
+	@cd rust && cargo clippy --all-targets -- -D warnings
+
 rust-test:
 	@cd rust && cargo test
 
-# Os testes de hardware tomam o device de saida de verdade. Em paralelo eles disputam o mesmo
-# device e reprovam sem que haja defeito, entao rodam em serie.
+# Os testes de hardware tomam o device de saída de verdade. Em paralelo eles disputam o mesmo
+# device e reprovam sem que haja defeito, então rodam em série.
 hw-test:
 	@cd rust && cargo test -- --ignored --test-threads=1
 
-rust-lib:
-	@cd rust && cargo build --release
-
-# Os bindings sao gerados a partir da staticlib, entao o .app nao precisa embarcar dylib.
-bindings: rust-lib
+# Os bindings são gerados a partir da staticlib, então o .app não precisa embarcar dylib.
+bindings: rust
 	@mkdir -p $(FFI_DIR)/include $(BIND_DIR)
 	@cd rust && cargo run -q --release --bin uniffi-bindgen -- \
 	  generate --library target/release/libhog_audio.a \
@@ -53,26 +47,26 @@ bindings: rust-lib
 swift-test: bindings
 	@cd apps/player && swift test
 
-test: cpp-test rust-test swift-test
+test: fmt-check lint rust-test swift-test
+
+# Gera os arquivos de áudio que os testes consomem. Áudio não é versionado neste repo, então
+# um clone limpo precisa rodar isto uma vez antes de `make test` — sem as fixtures os testes
+# que dependem delas falham, de propósito, em vez de passar sem exercitar nada.
+fixtures:
+	@./tools/make_fixtures.sh
 
 # make verify FILE=testdata/t96_24.flac BITS=24
-# Compara os bytes que cada implementação entregaria ao IOProc com o PCM que o ffmpeg
-# extrai do mesmo arquivo. As três comparações precisam bater.
-verify: all
+# Compara os bytes que o player entregaria ao IOProc com o PCM que o ffmpeg extrai do mesmo
+# arquivo. O ffmpeg é o oráculo: é ele que torna a prova independente deste código.
+verify: rust
 	@test -n "$(FILE)" || { echo "uso: make verify FILE=arquivo.flac BITS=24"; exit 2; }
 	@ffmpeg -v error -y -i "$(FILE)" -f s$(BITS)le /tmp/hog_ref.raw
-	@./$(CPP_BUILD)/hog-audio --dump /tmp/hog_cpp.raw "$(FILE)"
 	@./$(RUST_BIN) --dump /tmp/hog_rust.raw "$(FILE)"
-	@echo "--- C++ contra o oraculo ffmpeg ---"
-	@python3 tools/verify_bitperfect.py /tmp/hog_ref.raw /tmp/hog_cpp.raw --bits $(BITS)
-	@echo "--- Rust contra o oraculo ffmpeg ---"
 	@python3 tools/verify_bitperfect.py /tmp/hog_ref.raw /tmp/hog_rust.raw --bits $(BITS)
-	@echo "--- C++ contra Rust ---"
-	@cmp /tmp/hog_cpp.raw /tmp/hog_rust.raw && echo "dumps identicos"
 
 # make verify-pause FILE=testdata/t96_24.flac
-# O pause nao pode descartar nem duplicar bytes do ring buffer: o dump com uma pausa
-# injetada no meio tem de sair identico ao dump sem pausa.
+# O pause não pode descartar nem duplicar bytes do ring buffer: o dump com uma pausa
+# injetada no meio tem de sair idêntico ao dump sem pausa.
 verify-pause: rust
 	@test -n "$(FILE)" || { echo "uso: make verify-pause FILE=arquivo.flac"; exit 2; }
 	@./$(RUST_BIN) --dump /tmp/hog_sem_pausa.raw "$(FILE)" >/dev/null
@@ -80,12 +74,12 @@ verify-pause: rust
 	@test -s /tmp/hog_sem_pausa.raw || { echo "FALHOU: dump vazio"; exit 1; }
 	@test -s /tmp/hog_com_pausa.raw || { echo "FALHOU: dump vazio"; exit 1; }
 	@cmp /tmp/hog_sem_pausa.raw /tmp/hog_com_pausa.raw \
-	  && echo "pause: fluxo identico com e sem pausa"
+	  && echo "pause: fluxo idêntico com e sem pausa"
 
 # make verify-volume FILE=testdata/t96_24.flac
-# O volume e aplicado no device, nunca nas amostras que o dump grava. O modo dump adquire o
-# device e aplica o volume de verdade, mas nao registra o AudioDeviceIOProc: um ganho aplicado
-# dentro do callback de reproducao passaria despercebido por este teste (ver README).
+# O volume é aplicado no device, nunca nas amostras que o dump grava. O modo dump adquire o
+# device e aplica o volume de verdade, mas não registra o AudioDeviceIOProc: um ganho aplicado
+# dentro do callback de reprodução passaria despercebido por este teste (ver README).
 verify-volume: rust
 	@test -n "$(FILE)" || { echo "uso: make verify-volume FILE=arquivo.flac"; exit 2; }
 	@./$(RUST_BIN) --dump /tmp/hog_vol20.raw --volume 20 "$(FILE)" >/dev/null
@@ -93,17 +87,17 @@ verify-volume: rust
 	@test -s /tmp/hog_vol20.raw || { echo "FALHOU: dump vazio"; exit 1; }
 	@test -s /tmp/hog_vol90.raw || { echo "FALHOU: dump vazio"; exit 1; }
 	@cmp /tmp/hog_vol20.raw /tmp/hog_vol90.raw \
-	  && echo "volume: amostras identicas a 20% e 90%"
+	  && echo "volume: amostras idênticas a 20% e 90%"
 
 # make info FILE=musicas/faixa.flac — mostra o que seria negociado, sem tocar no device.
-info: cpp
+info: rust
 	@test -n "$(FILE)" || { echo "uso: make info FILE=caminho/do/arquivo.flac"; exit 2; }
-	@./$(CPP_BUILD)/hog-audio --info "$(FILE)"
+	@./$(RUST_BIN) --info "$(FILE)"
 
 # make play FILE=musicas/faixa.flac
-play: cpp
+play: rust
 	@test -n "$(FILE)" || { echo "uso: make play FILE=caminho/do/arquivo.flac"; exit 2; }
-	@./$(CPP_BUILD)/hog-audio "$(FILE)"
+	@./$(RUST_BIN) "$(FILE)"
 
 # Monta o .app: sem Info.plist o macOS trata o binário como processo de segundo plano e
 # ele nunca abre janela nem recebe foco de teclado.
@@ -115,7 +109,7 @@ app: bindings
 	@cp apps/player/.build/release/HogPlayer $(APP_DIR)/Contents/MacOS/HogAudio
 	@echo "app montado em $(APP_DIR)"
 
-# O .icns e versionado; so rode isto depois de mexer no SVG. Precisa de rsvg-convert.
+# O .icns é versionado; só rode isto depois de mexer no SVG. Precisa de rsvg-convert.
 icon:
 	@./tools/make_icon.sh
 
@@ -125,4 +119,4 @@ run-app: app
 	@$(APP_DIR)/Contents/MacOS/HogAudio "$(FILE)"
 
 clean:
-	@rm -rf $(CPP_BUILD) cpp/build-asan rust/target
+	@rm -rf rust/target apps/player/.build $(APP_DIR)

@@ -1,17 +1,13 @@
-cpp/build/
-cpp/build-asan/
 rust/target/
-build/
-build-asan/
-compile_commands.json
-.DS_Store
-.cache/
-apps/player/Sources/HogAudioFFI/
-apps/player/Sources/HogAudioBindings/
 apps/player/.build/
 apps/player/HogAudio.app/
+apps/player/Sources/HogAudioFFI/
+apps/player/Sources/HogAudioBindings/
+.cache/
+.DS_Store
 
-# arquivos de áudio de teste e de uso
+# Áudio não entra no repo: as fixtures de `testdata/` são geradas por `make fixtures`, e
+# `musicas/` é a coleção pessoal de quem desenvolve — nenhum dos dois é código.
 *.flac
 *.wav
 *.aiff
@@ -21,3 +17,4 @@ apps/player/HogAudio.app/
 *.caf
 
 prompts/
+.superpowers/
