@@ -67,62 +67,60 @@ private func item(_ keySpace: String, _ key: String, _ value: String) -> Metadat
     #expect(meta.artwork == jpeg)
 }
 
-// Caminhos relativos a apps/player, que é de onde `swift test` roda. Os arquivos não são
-// versionados — `.enabled(if:)` faz o Swift Testing reportar os quatro testes abaixo como
-// **skipped**, não como um "passou" que na verdade nunca rodou.
-private let skyfallFlacPath = "../../musicas/Skyfall.flac"
-private let houseOfMemoriesFlacPath = "../../musicas/10-House-of-Memories.flac"
-private let metaFixtureM4aPath = "../../testdata/meta_fixture.m4a"
-private let metaFixtureMp3Path = "../../testdata/meta_fixture.mp3"
+// Caminhos relativos a apps/player, que é de onde `swift test` roda. As fixtures não são
+// versionadas — `make fixtures` as gera, a partir da receita em `tools/make_fixtures.sh`.
+//
+// Um arquivo ausente **reprova** o teste, mesma política do lado Rust (`rust/src/fixtures.rs`).
+// Antes daqui saía um `.enabled(if:)`, que pulava calado: a suíte relatava sucesso sem ter
+// exercitado a leitura de metadados de verdade, que é justamente o que estes quatro testes
+// existem para cobrir.
+private func fixture(
+    _ name: String,
+    sourceLocation: SourceLocation = #_sourceLocation
+) throws -> URL {
+    let path = "../../testdata/\(name)"
+    try #require(
+        FileManager.default.fileExists(atPath: path),
+        "fixture ausente: \(path) — rode `make fixtures` na raiz do repositório",
+        sourceLocation: sourceLocation
+    )
+    return URL(fileURLWithPath: path)
+}
 
-@Test(.enabled(if: FileManager.default.fileExists(atPath: skyfallFlacPath)))
-func leUmFlacRealComCapa() async {
-    let meta = await loadMetadata(from: URL(fileURLWithPath: skyfallFlacPath))
-    #expect(meta.title == "Skyfall")
-    #expect(meta.artist == "Adele")
+// Os quatro testes abaixo cobrem o que os sintéticos de `org.id3`/`itsk` não cobrem: a função
+// `convert`, traduzindo `AVMetadataItem` que veio de um arquivo de verdade. Um formato por
+// teste, porque cada um guarda as tags de um jeito diferente — Vorbis comment no FLAC, átomos
+// no M4A, ID3v2 no MP3 — e é exatamente aí que a tradução costuma escorregar.
+
+@Test func leUmFlacRealComCapa() async throws {
+    let meta = await loadMetadata(from: try fixture("meta_fixture.flac"))
+    #expect(meta.title == "Titulo Teste")
+    #expect(meta.artist == "Artista Teste")
+    #expect(meta.album == "Album Teste")
     // O AVFoundation desmonta o bloco de imagem do FLAC e entrega JPEG puro: FF D8 é o
-    // marcador de início. Verificado neste arquivo, 38.583 bytes.
+    // marcador de início.
     #expect(meta.artwork != nil)
     #expect(meta.artwork?.prefix(2).elementsEqual([0xFF, 0xD8]) == true)
 }
 
-@Test(.enabled(if: FileManager.default.fileExists(atPath: houseOfMemoriesFlacPath)))
-func leUmFlacRealSemCapa() async {
-    let meta = await loadMetadata(from: URL(fileURLWithPath: houseOfMemoriesFlacPath))
-    #expect(meta.title == "House of Memories")
-    #expect(meta.artist == "Panic! At The Disco")
-    #expect(meta.album == "Death of a Bachelor")
-    #expect(meta.artwork == nil) // este arquivo não tem capa embutida, verificado com ffprobe
+@Test func leUmFlacRealSemCapa() async throws {
+    let meta = await loadMetadata(from: try fixture("meta_fixture_sem_capa.flac"))
+    #expect(meta.title == "Titulo Teste")
+    #expect(meta.artist == "Artista Teste")
+    #expect(meta.album == "Album Teste")
+    #expect(meta.artwork == nil)
 }
 
-// As fixtures de M4A e MP3 abaixo cobrem o que os testes sintéticos de `org.id3`/`itsk`
-// não cobrem: a função `convert` que traduz `AVMetadataItem` de verdade. Elas não são
-// versionadas (mesma regra de `musicas/`) — para recriá-las:
-//
-//   ffmpeg -v error -y -f lavfi -i "sine=frequency=440:duration=2" \
-//     -i musicas/Skyfall.flac -map 0:a -map 1:v -c:a alac -c:v copy \
-//     -disposition:v attached_pic \
-//     -metadata title="Titulo Teste" -metadata artist="Artista Teste" \
-//     -metadata album="Album Teste" testdata/meta_fixture.m4a
-//
-//   ffmpeg -v error -y -f lavfi -i "sine=frequency=440:duration=2" \
-//     -i musicas/Skyfall.flac -map 0:a -map 1:v -c:a libmp3lame -c:v copy \
-//     -id3v2_version 3 \
-//     -metadata title="Titulo Teste" -metadata artist="Artista Teste" \
-//     -metadata album="Album Teste" testdata/meta_fixture.mp3
-
-@Test(.enabled(if: FileManager.default.fileExists(atPath: metaFixtureM4aPath)))
-func leUmM4aRealComCapa() async {
-    let meta = await loadMetadata(from: URL(fileURLWithPath: metaFixtureM4aPath))
+@Test func leUmM4aRealComCapa() async throws {
+    let meta = await loadMetadata(from: try fixture("meta_fixture.m4a"))
     #expect(meta.title == "Titulo Teste")
     #expect(meta.artist == "Artista Teste")
     #expect(meta.album == "Album Teste")
     #expect(meta.artwork != nil)
 }
 
-@Test(.enabled(if: FileManager.default.fileExists(atPath: metaFixtureMp3Path)))
-func leUmMp3RealComCapa() async {
-    let meta = await loadMetadata(from: URL(fileURLWithPath: metaFixtureMp3Path))
+@Test func leUmMp3RealComCapa() async throws {
+    let meta = await loadMetadata(from: try fixture("meta_fixture.mp3"))
     #expect(meta.title == "Titulo Teste")
     #expect(meta.artist == "Artista Teste")
     #expect(meta.album == "Album Teste")

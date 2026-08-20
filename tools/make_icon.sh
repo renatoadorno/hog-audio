@@ -1,23 +1,23 @@
 #!/usr/bin/env bash
 # Gera o .icns do app a partir do SVG da logo.
 #
-# O conteudo e renderizado a 824 de 1024 e centralizado: e a proporcao que a Apple usa nos
-# icones do sistema, e sem ela o icone fica visivelmente maior que os vizinhos no Dock. O SVG
-# ja traz os cantos arredondados na proporcao certa (raio 229/1024 = 22,4%, contra os 22,5%
-# do padrao), entao so faltava a margem.
+# O conteúdo é renderizado a 824 de 1024 e centralizado: é a proporção que a Apple usa nos
+# ícones do sistema, e sem ela o ícone fica visivelmente maior que os vizinhos no Dock. O SVG
+# já traz os cantos arredondados na proporção certa (raio 229/1024 = 22,4%, contra os 22,5%
+# do padrão), então só faltava a margem.
 #
-# Cada tamanho e renderizado direto do vetor em vez de reduzido do maior: nos 16 e 32 px o
-# tracado do desenho e fino demais para sobreviver a um downsample.
+# Cada tamanho é renderizado direto do vetor em vez de reduzido do maior: nos 16 e 32 px o
+# traçado do desenho é fino demais para sobreviver a um downsample.
 #
-# Precisa de rsvg-convert (brew install librsvg). O .icns fica versionado, entao montar o app
-# nao depende desta ferramenta -- so regenerar depois de mexer no SVG.
+# Precisa de rsvg-convert (brew install librsvg). O .icns fica versionado, então montar o app
+# não depende desta ferramenta — só regenerar depois de mexer no SVG.
 set -euo pipefail
 
 SVG="${1:-logos/hog-icon-dark.svg}"
 DEST="${2:-apps/player/Resources/AppIcon.icns}"
 
 command -v rsvg-convert >/dev/null || { echo "falta rsvg-convert (brew install librsvg)"; exit 1; }
-test -f "$SVG" || { echo "svg nao encontrado: $SVG"; exit 1; }
+test -f "$SVG" || { echo "svg não encontrado: $SVG"; exit 1; }
 
 ICONSET="$(mktemp -d)/HogAudio.iconset"
 mkdir -p "$ICONSET"
@@ -45,4 +45,4 @@ render 1024 "$ICONSET/icon_512x512@2x.png"
 
 mkdir -p "$(dirname "$DEST")"
 iconutil -c icns "$ICONSET" -o "$DEST"
-echo "icone gerado em $DEST"
+echo "ícone gerado em $DEST"
