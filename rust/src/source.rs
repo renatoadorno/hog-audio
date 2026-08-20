@@ -22,6 +22,11 @@ unsafe impl Send for AudioSource {}
 
 // Formatos comprimidos (FLAC, ALAC) deixam mBitsPerChannel zerado e codificam a profundidade
 // da fonte nos format flags, com a mesma convenção do Apple Lossless.
+//
+// O `allow` cobre os nomes das constantes, que vêm do cabeçalho da Apple e não seguem a
+// convenção do Rust. Renomeá-las localmente esconderia a origem — é melhor casar com o nome
+// que está na documentação do Core Audio.
+#[allow(non_upper_case_globals)]
 fn bit_depth_from_source_flags(flags: u32) -> u32 {
     match flags {
         kAppleLosslessFormatFlag_16BitSourceData => 16,
@@ -236,13 +241,8 @@ mod tests {
 
     #[test]
     fn le_formato_do_flac_de_teste() {
-        let path = "../testdata/t96_24.flac";
-        if !std::path::Path::new(path).exists() {
-            eprintln!("pulando: {path} não existe (gere com ffmpeg)");
-            return;
-        }
-
-        let source = AudioSource::open(path).expect("deveria abrir o arquivo");
+        let path = crate::fixtures::path("t96_24.flac");
+        let source = AudioSource::open(&path).expect("deveria abrir o arquivo");
         let f = source.format();
 
         assert_eq!(f.sample_rate, 96000.0);

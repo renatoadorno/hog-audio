@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use crate::engine::{Engine, PlayFailure};
 use crate::transitions::PlayerState;
-use crate::volume::{parse_volume, VolumeRequest, VolumeUnit};
+use crate::volume::{VolumeRequest, VolumeUnit, parse_volume};
 
 #[derive(uniffi::Record)]
 pub struct Snapshot {
@@ -84,10 +84,12 @@ impl HogPlayer {
     /// carregado, ou uma falha anterior que só se resolve recarregando) — nada que reter o
     /// hardware; `PlayerError::Device` quando o device recusou ou não respondeu.
     pub fn play(&self) -> Result<(), PlayerError> {
-        self.engine.play_classified().map_err(|failure| match failure {
-            PlayFailure::State(message) => PlayerError::State { message },
-            PlayFailure::Device(message) => PlayerError::Device { message },
-        })
+        self.engine
+            .play_classified()
+            .map_err(|failure| match failure {
+                PlayFailure::State(message) => PlayerError::State { message },
+                PlayFailure::Device(message) => PlayerError::Device { message },
+            })
     }
 
     /// Suspende a reprodução sem soltar o device — retomar depois com `play` é rápido porque o

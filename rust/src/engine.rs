@@ -8,13 +8,13 @@ use std::thread::JoinHandle;
 
 use coreaudio_sys::AudioStreamBasicDescription;
 
-use crate::device::{query_default_output_device, HoggedDevice, OutputDevice};
+use crate::device::{HoggedDevice, OutputDevice, query_default_output_device};
 use crate::format::{self, Decision, SampleRateRange};
 use crate::playback::Playback;
 use crate::source::AudioSource;
 use crate::status::SharedStatus;
-use crate::transitions::{next_state, Command, PlayerState};
-use crate::volume::{apply_ceiling, VolumeRequest, VolumeUnit};
+use crate::transitions::{Command, PlayerState, next_state};
+use crate::volume::{VolumeRequest, VolumeUnit, apply_ceiling};
 
 /// O mesmo padrão da CLI: sem `--volume` explícito, o device é baixado para no máximo isto.
 pub const DEFAULT_CEILING: f64 = 0.5;
@@ -119,7 +119,9 @@ impl Engine {
     /// Um pânico dentro de um comando não pode deixar o player inutilizável para sempre: o
     /// estado interno é recuperado em vez de propagar o envenenamento do mutex.
     fn lock(&self) -> MutexGuard<'_, EngineInner> {
-        self.inner.lock().unwrap_or_else(|poison| poison.into_inner())
+        self.inner
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
     }
 
     /// Nunca bloqueia: usado por `poll_finished`, que o `snapshot()` da interface chama dez
@@ -449,7 +451,8 @@ impl Engine {
         }
 
         let ring_bytes = client.mSampleRate as usize * client.mBytesPerFrame as usize * 2;
-        self.status.set_track(source.total_frames(), file_format.sample_rate);
+        self.status
+            .set_track(source.total_frames(), file_format.sample_rate);
         let playback = Arc::new(Playback::new(
             ring_bytes,
             &client,
@@ -509,7 +512,8 @@ impl Engine {
             // (nenhum callback novo depois disso) e só então junta a produtora e zera
             // `inner.playback`, então o ponteiro nunca é lido depois do `Arc` cair.
             let context = Arc::as_ptr(&playback) as *mut std::ffi::c_void;
-            if let Err(error) = hogged.start(Some(crate::playback::io_proc), context) {
+            let started = unsafe { hogged.start(Some(crate::playback::io_proc), context) };
+            if let Err(error) = started {
                 // A produtora e o pré-buffer já rodaram; sem isto, ninguém mais teria a flag
                 // `stop` para sinalizar parada, e a thread giraria para sempre enchendo um
                 // ring buffer que nenhum consumidor vai esvaziar.
@@ -801,12 +805,9 @@ mod tests {
     #[test]
     #[ignore = "precisa de um device de saída real"]
     fn load_de_flac_valido_vai_para_loaded() {
-        let path = "../testdata/t96_24.flac";
-        if !std::path::Path::new(path).exists() {
-            panic!("fixture ausente: {path} (gere com ffmpeg)");
-        }
+        let path = crate::fixtures::path("t96_24.flac");
         let engine = Engine::new();
-        let track = engine.load(path).expect("deveria carregar");
+        let track = engine.load(&path).expect("deveria carregar");
 
         assert_eq!(engine.state(), PlayerState::Loaded);
         assert_eq!(track.sample_rate, 96000.0);
@@ -821,14 +822,11 @@ mod tests {
     #[test]
     #[ignore = "precisa de um device de saída real"]
     fn carregar_de_novo_substitui_a_faixa_anterior() {
-        let a = "../testdata/t96_24.flac";
-        let b = "../testdata/t44_16.flac";
-        if !std::path::Path::new(a).exists() || !std::path::Path::new(b).exists() {
-            panic!("fixture ausente: {a} ou {b} (gere com ffmpeg)");
-        }
+        let a = crate::fixtures::path("t96_24.flac");
+        let b = crate::fixtures::path("t44_16.flac");
         let engine = Engine::new();
-        engine.load(a).expect("deveria carregar o primeiro");
-        let track = engine.load(b).expect("deveria carregar o segundo");
+        engine.load(&a).expect("deveria carregar o primeiro");
+        let track = engine.load(&b).expect("deveria carregar o segundo");
         assert_eq!(track.sample_rate, 44100.0);
         assert_eq!(engine.state(), PlayerState::Loaded);
     }
@@ -838,15 +836,14 @@ mod tests {
     fn negociacao_recusada_preserva_a_faixa_carregada() {
         // 192 kHz não está entre os rates do device built-in: a negociação recusa antes de
         // qualquer teardown acontecer.
-        let anterior = "../testdata/t96_24.flac";
-        let recusado = "../testdata/t192_24.flac";
-        if !std::path::Path::new(anterior).exists() || !std::path::Path::new(recusado).exists() {
-            panic!("fixture ausente: {anterior} ou {recusado} (gere com ffmpeg)");
-        }
+        let anterior = crate::fixtures::path("t96_24.flac");
+        let recusado = crate::fixtures::path("t192_24.flac");
         let engine = Engine::new();
-        engine.load(anterior).expect("deveria carregar a primeira faixa");
+        engine
+            .load(&anterior)
+            .expect("deveria carregar a primeira faixa");
 
-        assert!(engine.load(recusado).is_err());
+        assert!(engine.load(&recusado).is_err());
 
         // O que dá valor ao teste: a faixa anterior sobrevive à tentativa recusada, em vez de
         // deixar o engine em Loaded com nada de fato carregado.
@@ -876,33 +873,38 @@ mod tests {
         // conectado, isso é observável de forma direta: o id/nome do device muda de "Fones de
         // Ouvido Externos" para "Alto-falantes (MacBook Air)" quando `load()` volta a
         // consultar o default enquanto o fone está retido.
-        let primeira = "../testdata/t96_24.flac";
-        let segunda = "../testdata/t44_16.flac";
-        for path in [primeira, segunda] {
-            if !std::path::Path::new(path).exists() {
-                panic!("fixture ausente: {path} (gere com ffmpeg)");
-            }
-        }
+        let primeira = crate::fixtures::path("t96_24.flac");
+        let segunda = crate::fixtures::path("t44_16.flac");
 
         let engine = Engine::new();
-        engine.load(primeira).expect("deveria carregar a primeira faixa");
+        engine
+            .load(&primeira)
+            .expect("deveria carregar a primeira faixa");
         engine.play().expect("deveria tocar a primeira faixa");
         assert_eq!(engine.state(), PlayerState::Playing);
 
         let (id_antes, nome_antes) = {
             let inner = engine.lock();
-            let d = inner.device.as_ref().expect("device deveria estar consultado");
+            let d = inner
+                .device
+                .as_ref()
+                .expect("device deveria estar consultado");
             (d.id, d.name.clone())
         };
 
         // Carrega a segunda faixa com a primeira ainda tocando/retida: é exatamente a
         // condição em que o "device de saída padrão" do sistema mente.
-        engine.load(segunda).expect("deveria carregar a segunda faixa");
+        engine
+            .load(&segunda)
+            .expect("deveria carregar a segunda faixa");
         assert_eq!(engine.state(), PlayerState::Loaded);
 
         let (id_depois, nome_depois) = {
             let inner = engine.lock();
-            let d = inner.device.as_ref().expect("device deveria estar consultado");
+            let d = inner
+                .device
+                .as_ref()
+                .expect("device deveria estar consultado");
             (d.id, d.name.clone())
         };
 
@@ -924,12 +926,9 @@ mod tests {
     #[test]
     #[ignore = "precisa de um device de saída real; toma o device por alguns segundos"]
     fn ciclo_play_pause_play_shutdown() {
-        let path = "../testdata/t96_24.flac";
-        if !std::path::Path::new(path).exists() {
-            panic!("fixture ausente: {path} (gere com ffmpeg)");
-        }
+        let path = crate::fixtures::path("t96_24.flac");
         let engine = Engine::new();
-        engine.load(path).expect("deveria carregar");
+        engine.load(&path).expect("deveria carregar");
 
         engine.play().expect("deveria tocar");
         assert_eq!(engine.state(), PlayerState::Playing);
@@ -975,12 +974,9 @@ mod tests {
             kAudioObjectPropertyScopeGlobal, pid_t,
         };
 
-        let path = "../testdata/t44_16.flac";
-        if !std::path::Path::new(path).exists() {
-            panic!("fixture ausente: {path} (gere com ffmpeg)");
-        }
+        let path = crate::fixtures::path("t44_16.flac");
         let engine = Engine::new();
-        engine.load(path).expect("deveria carregar");
+        engine.load(&path).expect("deveria carregar");
 
         engine.play().expect("deveria tocar a primeira vez");
         assert_eq!(engine.state(), PlayerState::Playing);
@@ -1022,7 +1018,8 @@ mod tests {
 
         // Fato 1: o dono do hog mode é este processo. Se o Drop do HoggedDevice antigo
         // tivesse liberado o hog por baixo da sessão nova, isto leria outro dono (ou nenhum).
-        let hog_address = property_address(kAudioDevicePropertyHogMode, kAudioObjectPropertyScopeGlobal);
+        let hog_address =
+            property_address(kAudioDevicePropertyHogMode, kAudioObjectPropertyScopeGlobal);
         let owner: pid_t =
             get_property(device_id, &hog_address).expect("deveria ler o dono do hog mode");
         assert_eq!(
@@ -1033,8 +1030,10 @@ mod tests {
 
         // Fato 2: o sample rate do device é o da faixa (44100 Hz). Se o Drop antigo tivesse
         // revertido o rate, isto leria o valor pré-hog em vez do negociado.
-        let rate_address =
-            property_address(kAudioDevicePropertyNominalSampleRate, kAudioObjectPropertyScopeGlobal);
+        let rate_address = property_address(
+            kAudioDevicePropertyNominalSampleRate,
+            kAudioObjectPropertyScopeGlobal,
+        );
         let rate: f64 =
             get_property(device_id, &rate_address).expect("deveria ler o sample rate nominal");
         assert!(
@@ -1042,7 +1041,9 @@ mod tests {
             "o sample rate deveria continuar em 44100 Hz (o negociado) durante a segunda              reprodução; {rate} Hz denunciaria o Drop do HoggedDevice antigo revertendo para              a taxa pré-hog"
         );
 
-        engine.shutdown().expect("deveria restaurar o device depois da segunda reprodução");
+        engine
+            .shutdown()
+            .expect("deveria restaurar o device depois da segunda reprodução");
         assert_eq!(engine.state(), PlayerState::Idle);
     }
 
@@ -1054,19 +1055,18 @@ mod tests {
         // `inner.volume` nesse ramo, `stop_and_release` restaura o volume pré-hog e a
         // aquisição seguinte aplica só o teto sobre essa leitura — o volume escolhido pelo
         // usuário some, e pode até subir.
-        let path = "../testdata/t96_24.flac";
-        if !std::path::Path::new(path).exists() {
-            panic!("fixture ausente: {path} (gere com ffmpeg)");
-        }
+        let path = crate::fixtures::path("t96_24.flac");
 
         let engine = Engine::new();
-        engine.load(path).expect("deveria carregar");
+        engine.load(&path).expect("deveria carregar");
         engine.play().expect("deveria tocar");
         assert_eq!(engine.state(), PlayerState::Playing);
 
         // Bem abaixo do teto padrão (50%): se o pedido não persistir, a aquisição seguinte
         // aplicaria o teto sobre a leitura pré-hog, que fica livre para ficar bem acima disto.
-        engine.set_volume(0.05).expect("deveria conseguir baixar o volume com o device na mão");
+        engine
+            .set_volume(0.05)
+            .expect("deveria conseguir baixar o volume com o device na mão");
         assert!(
             matches!(
                 engine.lock().volume,
@@ -1105,7 +1105,9 @@ mod tests {
             outcome.scalar * 100.0
         );
 
-        engine.shutdown().expect("deveria restaurar o device depois da segunda reprodução");
+        engine
+            .shutdown()
+            .expect("deveria restaurar o device depois da segunda reprodução");
         assert_eq!(engine.state(), PlayerState::Idle);
     }
 }

@@ -8,6 +8,7 @@ pub mod api;
 pub mod device;
 pub mod engine;
 pub mod ffi;
+pub mod fixtures;
 pub mod format;
 pub mod playback;
 pub mod ring;

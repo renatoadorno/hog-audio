@@ -177,7 +177,7 @@ mod tests {
     #[test]
     fn wrap_around_preserva_os_dados() {
         let rb = RingBuffer::new(16);
-        let mut descarte = vec![0u8; 16];
+        let mut descarte = [0u8; 16];
 
         // Consome quase todo o buffer para empurrar os índices para perto do fim.
         rb.write(&sequence(12, 100));
@@ -327,14 +327,14 @@ mod tests {
 
         rb.write(&sequence(20, 0)); // 3 frames completos + 2 bytes soltos
 
-        let mut saida = vec![0xFFu8; 24];
+        let mut saida = [0xFFu8; 24];
         let primeira = aligned_read_size(24, rb.available_to_read(), FRAME);
         assert_eq!(rb.read(&mut saida[..primeira]), 18);
 
         // Chega o resto do fluxo; a próxima leitura tem de retomar no byte 18.
         rb.write(&sequence(10, 20));
 
-        let mut segunda = vec![0u8; 12];
+        let mut segunda = [0u8; 12];
         let n = aligned_read_size(12, rb.available_to_read(), FRAME);
         rb.read(&mut segunda[..n]);
 

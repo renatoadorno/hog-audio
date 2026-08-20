@@ -39,10 +39,10 @@ fn same_rate(a: f64, b: f64) -> bool {
 fn wait_for_rate(device: AudioObjectID, target: f64) -> bool {
     let address = property_address(kAudioDevicePropertyNominalSampleRate, SCOPE_GLOBAL);
     for _ in 0..200 {
-        if let Ok(current) = get_property::<f64>(device, &address) {
-            if same_rate(current, target) {
-                return true;
-            }
+        if let Ok(current) = get_property::<f64>(device, &address)
+            && same_rate(current, target)
+        {
+            return true;
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
@@ -55,26 +55,41 @@ pub fn query_default_output_device() -> Result<OutputDevice, String> {
         kAudioObjectSystemObject,
         &property_address(kAudioHardwarePropertyDefaultOutputDevice, SCOPE_GLOBAL),
     )
-    .map_err(|s| format!("não encontrei o device de saída padrão: {}", os_status_text(s)))?;
+    .map_err(|s| {
+        format!(
+            "não encontrei o device de saída padrão: {}",
+            os_status_text(s)
+        )
+    })?;
 
     if id == kAudioObjectUnknown {
         return Err("não encontrei o device de saída padrão".to_string());
     }
 
-    let name = get_property::<CFStringRef>(id, &property_address(kAudioObjectPropertyName, SCOPE_GLOBAL))
-        .map(cf_string_into_owned)
-        .unwrap_or_default();
+    let name = get_property::<CFStringRef>(
+        id,
+        &property_address(kAudioObjectPropertyName, SCOPE_GLOBAL),
+    )
+    // SAFETY: a referência vem de uma property do HAL, que a entrega já retida — consumir a
+    // posse aqui é o que fecha o par com o `CFRelease` lá dentro.
+    .map(|reference| unsafe { cf_string_into_owned(reference) })
+    .unwrap_or_default();
 
-    let streams: Vec<AudioStreamID> =
-        get_property_array(id, &property_address(kAudioDevicePropertyStreams, SCOPE_OUTPUT))
-            .map_err(|s| format!("o device não expõe stream de saída: {}", os_status_text(s)))?;
+    let streams: Vec<AudioStreamID> = get_property_array(
+        id,
+        &property_address(kAudioDevicePropertyStreams, SCOPE_OUTPUT),
+    )
+    .map_err(|s| format!("o device não expõe stream de saída: {}", os_status_text(s)))?;
     let Some(&stream_id) = streams.first() else {
         return Err("o device não expõe stream de saída".to_string());
     };
 
     let ranges: Vec<AudioValueRange> = get_property_array(
         id,
-        &property_address(kAudioDevicePropertyAvailableNominalSampleRates, SCOPE_GLOBAL),
+        &property_address(
+            kAudioDevicePropertyAvailableNominalSampleRates,
+            SCOPE_GLOBAL,
+        ),
     )
     .map_err(|s| format!("não consegui listar os sample rates: {}", os_status_text(s)))?;
 
@@ -82,7 +97,12 @@ pub fn query_default_output_device() -> Result<OutputDevice, String> {
         stream_id,
         &property_address(kAudioStreamPropertyAvailablePhysicalFormats, SCOPE_GLOBAL),
     )
-    .map_err(|s| format!("não consegui listar os formatos físicos: {}", os_status_text(s)))?;
+    .map_err(|s| {
+        format!(
+            "não consegui listar os formatos físicos: {}",
+            os_status_text(s)
+        )
+    })?;
 
     let mut caps = DeviceCaps {
         rates: ranges
@@ -131,9 +151,11 @@ pub fn query_default_output_device() -> Result<OutputDevice, String> {
         caps.output_channels = current.mChannelsPerFrame;
     }
 
-    let nominal_rate =
-        get_property::<f64>(id, &property_address(kAudioDevicePropertyNominalSampleRate, SCOPE_GLOBAL))
-            .unwrap_or(0.0);
+    let nominal_rate = get_property::<f64>(
+        id,
+        &property_address(kAudioDevicePropertyNominalSampleRate, SCOPE_GLOBAL),
+    )
+    .unwrap_or(0.0);
     let volume = get_property::<f32>(
         id,
         &property_address(kAudioDevicePropertyVolumeScalar, SCOPE_OUTPUT),
@@ -359,10 +381,10 @@ impl HoggedDevice {
             // A confirmação precisa vir depois de uma pausa: ler imediatamente devolve o
             // valor que acabamos de escrever, mesmo quando o device não o assumiu.
             std::thread::sleep(std::time::Duration::from_millis(30));
-            if let Ok(current) = get_property::<f32>(self.device_id, &address) {
-                if (current - target).abs() < 0.005 {
-                    return true;
-                }
+            if let Ok(current) = get_property::<f32>(self.device_id, &address)
+                && (current - target).abs() < 0.005
+            {
+                return true;
             }
         }
         false
@@ -417,8 +439,9 @@ impl HoggedDevice {
     pub fn set_volume(&mut self, scalar: f32) -> Result<(), String> {
         let scalar = self.prepare_volume_write(scalar)?;
         if !self.write_volume_confirmed(scalar) {
-            return Err("o device não assumiu o volume pedido; não vou tocar sem essa garantia"
-                .to_string());
+            return Err(
+                "o device não assumiu o volume pedido; não vou tocar sem essa garantia".to_string(),
+            );
         }
         Ok(())
     }
@@ -433,7 +456,15 @@ impl HoggedDevice {
         Ok(())
     }
 
-    pub fn start(
+    /// Registra o callback e abre o fluxo.
+    ///
+    /// # Safety
+    ///
+    /// `context` é entregue ao Core Audio, que o repassa cru a cada disparo de `io_proc`.
+    /// Quem chama garante que ele aponta para um valor vivo enquanto o callback puder
+    /// disparar — isto é, ao menos até `stop()` retornar. O contrato não cabia no tipo antes
+    /// de esta função ser `unsafe`, e ficava só em prosa no chamador.
+    pub unsafe fn start(
         &mut self,
         io_proc: AudioDeviceIOProc,
         context: *mut std::ffi::c_void,
@@ -578,14 +609,20 @@ mod tests {
     /// `toma_o_device_e_restaura` passou a reprovar sem que houvesse defeito — ele conferia o
     /// rate das caixas embutidas enquanto segurava o fone.
     fn rate_do_hardware(id: AudioObjectID) -> f64 {
-        get_property::<f64>(id, &property_address(kAudioDevicePropertyNominalSampleRate, SCOPE_GLOBAL))
-            .expect("ler o nominal rate do device")
+        get_property::<f64>(
+            id,
+            &property_address(kAudioDevicePropertyNominalSampleRate, SCOPE_GLOBAL),
+        )
+        .expect("ler o nominal rate do device")
     }
 
     /// Mesmo motivo de `rate_do_hardware`, para o volume.
     fn volume_do_hardware(id: AudioObjectID) -> f32 {
-        get_property::<f32>(id, &property_address(kAudioDevicePropertyVolumeScalar, SCOPE_OUTPUT))
-            .expect("ler o volume do device")
+        get_property::<f32>(
+            id,
+            &property_address(kAudioDevicePropertyVolumeScalar, SCOPE_OUTPUT),
+        )
+        .expect("ler o volume do device")
     }
     #[test]
     #[ignore]
@@ -749,7 +786,10 @@ mod tests {
             hogged.set_volume(0.2).expect("set_volume");
 
             let (scalar, _) = hogged.read_volume().expect("read_volume");
-            assert!((scalar - 0.2).abs() < 0.005, "volume deveria ser 0.2, é {scalar}");
+            assert!(
+                (scalar - 0.2).abs() < 0.005,
+                "volume deveria ser 0.2, é {scalar}"
+            );
         }
 
         std::thread::sleep(std::time::Duration::from_millis(500));

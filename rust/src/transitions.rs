@@ -25,10 +25,7 @@ pub struct TransitionError {
     pub message: &'static str,
 }
 
-pub fn next_state(
-    current: PlayerState,
-    command: Command,
-) -> Result<PlayerState, TransitionError> {
+pub fn next_state(current: PlayerState, command: Command) -> Result<PlayerState, TransitionError> {
     use Command::*;
     use PlayerState::*;
 
@@ -95,7 +92,11 @@ mod tests {
 
     #[test]
     fn play_toca_a_partir_de_loaded_paused_e_finished() {
-        for estado in [PlayerState::Loaded, PlayerState::Paused, PlayerState::Finished] {
+        for estado in [
+            PlayerState::Loaded,
+            PlayerState::Paused,
+            PlayerState::Finished,
+        ] {
             assert_eq!(
                 next_state(estado, Command::Play),
                 Ok(PlayerState::Playing),

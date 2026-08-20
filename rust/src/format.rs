@@ -91,7 +91,11 @@ fn supported_rates_text(rates: &[SampleRateRange]) -> String {
         if same_rate(r.minimum, r.maximum) {
             out.push_str(&rate_text(r.minimum));
         } else {
-            out.push_str(&format!("{}-{}", rate_text(r.minimum), rate_text(r.maximum)));
+            out.push_str(&format!(
+                "{}-{}",
+                rate_text(r.minimum),
+                rate_text(r.maximum)
+            ));
         }
     }
     if out.is_empty() {
@@ -224,12 +228,12 @@ pub fn validate_interleaved_format(
     if bytes_per_frame == 0 {
         return fail("formato sem tamanho de frame".to_string());
     }
-    if bits_per_channel % 8 != 0 {
+    if !bits_per_channel.is_multiple_of(8) {
         return fail(format!(
             "profundidade de {bits_per_channel} bits não é múltipla de 8; o layout no buffer seria ambíguo"
         ));
     }
-    if bytes_per_frame % channels != 0 {
+    if !bytes_per_frame.is_multiple_of(channels) {
         return fail(format!(
             "frame de {bytes_per_frame} bytes não divide entre {channels} canais"
         ));

@@ -50,23 +50,20 @@ fn parse_number(text: &str) -> Option<f64> {
     }
     let mut chars = text.chars().peekable();
     let mut sign = 1.0;
-    if let Some(&c) = chars.peek() {
-        if c == '+' || c == '-' {
-            if c == '-' {
-                sign = -1.0;
-            }
-            chars.next();
+    if let Some(&c) = chars.peek()
+        && (c == '+' || c == '-')
+    {
+        if c == '-' {
+            sign = -1.0;
         }
+        chars.next();
     }
 
     let rest: String = chars.collect();
     if rest.is_empty() {
         return None;
     }
-    if !rest
-        .chars()
-        .all(|c| c.is_ascii_digit() || c == '.')
-    {
+    if !rest.chars().all(|c| c.is_ascii_digit() || c == '.') {
         return None;
     }
     if rest.matches('.').count() > 1 {

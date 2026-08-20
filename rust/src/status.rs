@@ -5,7 +5,7 @@
 //! O IOProc escreve `frames_rendered` e `underruns` daqui. Por isso tudo é atômico: são as
 //! únicas operações que um callback de tempo real pode fazer com segurança.
 
-use std::sync::atomic::{AtomicI64, AtomicU32, AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU8, AtomicU32, AtomicU64, Ordering};
 
 use crate::transitions::PlayerState;
 

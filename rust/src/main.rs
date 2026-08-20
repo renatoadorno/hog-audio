@@ -1,17 +1,19 @@
 use std::io::Write;
 use std::sync::atomic::{AtomicI32, Ordering};
 
-use coreaudio_sys::{AudioStreamBasicDescription, kAudioFormatFlagIsFloat, kAudioFormatFlagIsNonInterleaved};
+use coreaudio_sys::{
+    AudioStreamBasicDescription, kAudioFormatFlagIsFloat, kAudioFormatFlagIsNonInterleaved,
+};
 
-use hog_audio::engine::{DeviceReport, Engine, LoadedTrack, VolumeOutcome, DEFAULT_CEILING};
+use hog_audio::engine::{DEFAULT_CEILING, DeviceReport, Engine, LoadedTrack, VolumeOutcome};
 use hog_audio::ring::aligned_read_size;
 use hog_audio::transitions::PlayerState;
-use hog_audio::volume::{parse_volume, VolumeRequest, VolumeUnit};
+use hog_audio::volume::{VolumeRequest, VolumeUnit, parse_volume};
 
 const DUMP_BLOCK_FRAMES: usize = 512;
 
-// Declarado à mão em vez de trazer a crate libc: a comparação com o C++ exige dependência
-// única, e o que precisamos daqui é uma função só.
+// Declarado à mão em vez de trazer a crate libc: o projeto mantém `coreaudio-sys` como
+// dependência única, e o que se precisa daqui é uma função só.
 unsafe extern "C" {
     fn signal(sig: i32, handler: usize) -> usize;
 }
@@ -98,7 +100,11 @@ fn describe_volume_outcome(outcome: &VolumeOutcome) -> String {
     if outcome.decibels.is_nan() {
         "desconhecido".to_string()
     } else {
-        format!("{:.0}% ({:.1} dB)", outcome.scalar * 100.0, outcome.decibels)
+        format!(
+            "{:.0}% ({:.1} dB)",
+            outcome.scalar * 100.0,
+            outcome.decibels
+        )
     }
 }
 
@@ -129,7 +135,10 @@ fn print_volume_outcome(outcome: &VolumeOutcome, explicit_request: bool, ceiling
             outcome.previous_scalar * 100.0
         );
     } else {
-        println!("volume   : {applied} (abaixo do teto de {:.0}%)", ceiling * 100.0);
+        println!(
+            "volume   : {applied} (abaixo do teto de {:.0}%)",
+            ceiling * 100.0
+        );
     }
 }
 
@@ -235,7 +244,7 @@ fn main() {
 
 fn run() -> i32 {
     for sig in [SIGINT, SIGTERM, SIGHUP, SIGQUIT] {
-        unsafe { signal(sig, on_interrupt as usize) };
+        unsafe { signal(sig, on_interrupt as *const () as usize) };
     }
 
     let options = match parse_args() {
@@ -279,7 +288,10 @@ fn run() -> i32 {
     if let Some(outcome) = engine.volume_outcome() {
         print_volume_outcome(&outcome, options.volume.is_some(), options.ceiling);
     }
-    println!("tocando  : {:.1} s — Ctrl+C interrompe", track.total_seconds);
+    println!(
+        "tocando  : {:.1} s — Ctrl+C interrompe",
+        track.total_seconds
+    );
 
     while !interrupted() && engine.state() == PlayerState::Playing {
         std::thread::sleep(std::time::Duration::from_millis(50));
@@ -302,11 +314,7 @@ fn run() -> i32 {
     }
 
     println!("fim      : device restaurado");
-    if by_user {
-        130
-    } else {
-        0
-    }
+    if by_user { 130 } else { 0 }
 }
 
 /// Consome o ring exatamente como o IOProc faria, mas grava em disco. O pipeline é o mesmo —
@@ -362,11 +370,12 @@ fn run_dump(
             // chamado por um tempo. O ring buffer não é tocado, a produtora enche e bloqueia, e
             // ao voltar a leitura continua no byte seguinte. Se algum dia a pausa passar a
             // descartar ou reiniciar o buffer, a saída deixa de bater e este teste reprova.
-            if let Some(limit) = pause_at {
-                if !already_paused && frames_written >= limit as u64 {
-                    already_paused = true;
-                    std::thread::sleep(std::time::Duration::from_millis(400));
-                }
+            if let Some(limit) = pause_at
+                && !already_paused
+                && frames_written >= limit as u64
+            {
+                already_paused = true;
+                std::thread::sleep(std::time::Duration::from_millis(400));
             }
             continue;
         }

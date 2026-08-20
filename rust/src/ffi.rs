@@ -2,7 +2,7 @@
 //! para que o resto do código não repita o padrão de ponteiro e tamanho.
 
 use coreaudio_sys::*;
-use std::mem::{size_of, MaybeUninit};
+use std::mem::{MaybeUninit, size_of};
 
 pub fn property_address(selector: u32, scope: u32) -> AudioObjectPropertyAddress {
     AudioObjectPropertyAddress {
@@ -79,11 +79,7 @@ pub fn get_property_array<T: Clone + Default>(
             out.as_mut_ptr() as *mut _,
         )
     };
-    if status == 0 {
-        Ok(out)
-    } else {
-        Err(status)
-    }
+    if status == 0 { Ok(out) } else { Err(status) }
 }
 
 pub fn has_property(object: AudioObjectID, address: &AudioObjectPropertyAddress) -> bool {
@@ -113,7 +109,13 @@ pub fn os_status_text(status: OSStatus) -> String {
 }
 
 /// Converte uma CFStringRef para String e a libera.
-pub fn cf_string_into_owned(reference: CFStringRef) -> String {
+///
+/// # Safety
+///
+/// `reference` tem de ser nula ou uma `CFStringRef` válida cuja posse passa para esta
+/// função: ela chama `CFRelease` na saída. Usar a referência depois disto é uso após
+/// liberação.
+pub unsafe fn cf_string_into_owned(reference: CFStringRef) -> String {
     if reference.is_null() {
         return String::new();
     }
