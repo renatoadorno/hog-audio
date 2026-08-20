@@ -6,8 +6,11 @@ dividindo o conversor.
 
 ```
 make
-./build/hog-audio musicas/faixa.flac
+./rust/target/release/hog-audio musicas/faixa.flac
 ```
+
+Ou pelo Makefile, que é como o resto deste documento chama:
+`make play FILE=musicas/faixa.flac`.
 
 ## O que ele faz
 
@@ -22,7 +25,7 @@ make
 6. Devolve o device ao estado original ao terminar, inclusive com Ctrl+C.
 
 ```
-$ ./build/hog-audio musicas/faixa.flac
+$ ./rust/target/release/hog-audio musicas/faixa.flac
 arquivo  : flac — 96000 Hz / 24 bits / 2 canais
 device   : Alto-falantes (MacBook Air)
 rate atual: 96000 Hz
@@ -184,16 +187,26 @@ decodificador, ring buffer e alinhamento de frame — mas **não registra o
 `AudioDeviceIOProc`**: nenhuma das três executa uma linha do callback de tempo real.
 
 ```
-make verify FILE=testdata/t96_24.flac BITS=24  # C++ e Rust batem, amostra a amostra, com o PCM do ffmpeg
+make verify FILE=testdata/t96_24.flac BITS=24  # bate, amostra a amostra, com o PCM que o ffmpeg extrai
 make verify-pause FILE=testdata/t96_24.flac    # o consumidor parar no meio não descarta nem duplica byte do ring buffer
 make verify-volume FILE=testdata/t96_24.flac   # o volume muda no device, nunca nas amostras que o dump grava
 ```
 
+O `verify` só é válido para arquivo **estéreo em rate que o device suporte**, e nem toda
+fixture serve:
+
+| Fixture | No `verify` | Por quê |
+|---|---|---|
+| `t96_24`, `t44_16`, `t44_longo`, `t96_longo` | bate | estéreo, rate suportado |
+| `t48_16_mono` | diverge, e está certo | o player duplica mono nos dois canais; a referência do ffmpeg tem um só |
+| `t192_24` | nem roda | o device vai até 96 kHz e o player **recusa tocar** — é a fixture que prova a recusa |
+
 O que cada uma prova de fato, e o que fica de fora:
 
-- **`verify`**: compara byte a byte o que C++, Rust e o `ffmpeg` produzem a partir do mesmo
-  arquivo. Cobre decodificador, ring buffer e alinhamento de frame — de onde saíram os bugs
-  mais caros até aqui.
+- **`verify`**: compara byte a byte o que o player e o `ffmpeg` produzem a partir do mesmo
+  arquivo. O ffmpeg é o oráculo — uma implementação independente desta —, e é o que torna a
+  prova mais que autoconfirmação. Cobre decodificador, ring buffer e alinhamento de frame, de
+  onde saíram os bugs mais caros até aqui.
 - **`verify-pause`**: `--pause-at` dorme *dentro do laço do dump*, não chama `Engine::pause`.
   O que ela prova é que o ring buffer sobrevive a um consumidor que para de ler por um tempo e
   retoma sem perder nem repetir byte — não que o `pause()` de verdade do engine seja
@@ -205,31 +218,68 @@ O que cada uma prova de fato, e o que fica de fora:
 
 Isso não diminui o valor delas — é o que garante, a cada mudança, que a fatia do caminho antes
 do IOProc continua intacta —, só marca onde a cobertura para: o callback de tempo real em si
-só é validado ouvindo a reprodução de verdade ou inspecionando o código sob `make cpp-asan`.
+só é validado ouvindo a reprodução de verdade ou lendo o código com cuidado. É a razão de os
+sete testes de `playback.rs` chamarem o `io_proc` diretamente, com um `AudioBufferList`
+sintético: sem device, mas exercitando o callback de verdade.
 
 ## Estrutura
 
+Duas linguagens, cada uma com um papel único — ver
+[ADR 0002](docs/adr/0002-consolidar-o-core-em-rust.md):
+
 ```
-src/format_negotiation.*  decide rate e formato — puro, sem Core Audio, coberto por testes
-src/volume.*              interpreta o volume pedido e o teto — puro, coberto por testes
-src/ring_buffer.hpp       fila sem locks entre o decodificador e a thread de tempo real
-src/audio_source.*        decodificação via ExtendedAudioFile
-src/hog_device.*          HAL: modo exclusivo, lock de formato, IOProc, restauração via RAII
-src/main.cpp              CLI, orquestração e tratamento de sinal
+rust/      o core inteiro: HAL, formato, ring buffer, IOProc, decodificação e a CLI
+apps/      o app SwiftUI, que fala com o core por uniffi
+tools/     scripts de apoio: verificador de bit-perfect, ícone, gerador de fixtures
+testdata/  os arquivos de áudio dos testes (gerados por `make fixtures`, não versionados)
+docs/      ADRs e o registro dos trabalhos já feitos
 ```
 
-A decisão de "isto pode tocar sem perda?" fica isolada do hardware de propósito: é a regra que
-mais importa e a única que dá para verificar sem plugar um fone.
+O core, por módulo:
+
+```
+rust/src/format.rs       decide rate e formato — puro, sem Core Audio, coberto por testes
+rust/src/volume.rs       interpreta o volume pedido e o teto — puro, coberto por testes
+rust/src/transitions.rs  regras da máquina de estados — puras, todo par estado × comando
+rust/src/ring.rs         fila sem locks entre o decodificador e a thread de tempo real
+rust/src/source.rs       decodificação via ExtendedAudioFile
+rust/src/device.rs       HAL: modo exclusivo, lock de formato, volume, IOProc, restauração
+rust/src/playback.rs     o estado que o IOProc lê, e o próprio callback de tempo real
+rust/src/engine.rs       a casca imperativa: efeitos sobre hardware, arquivo e threads
+rust/src/api.rs          a superfície uniffi que o Swift enxerga — só controle, nunca áudio
+rust/src/main.rs         CLI, orquestração e tratamento de sinal
+```
+
+Os quatro primeiros são puros de propósito. A decisão de "isto pode tocar sem perda?" fica
+isolada do hardware: é a regra que mais importa e a única que dá para verificar sem plugar um
+fone.
 
 ## Desenvolvimento
 
+Num clone limpo, comece gerando os arquivos de teste — áudio não entra no repositório, a
+receita entra:
+
 ```
-make test        # testes do núcleo puro
-make cpp-asan    # os mesmos testes sob AddressSanitizer e UBSan
+make fixtures    # gera testdata/ com ffmpeg, a partir de tools/make_fixtures.sh
+```
+
+Daí em diante:
+
+```
+make test        # fmt + clippy + os testes do core e do app
+make fmt         # formata o Rust
+make lint        # clippy com -D warnings
+make hw-test     # os testes que tomam o device de verdade, em série
 make info FILE=musicas/faixa.flac
 make play FILE=musicas/faixa.flac
 ```
 
-O IOProc roda em thread de tempo real: dentro dele só existem `memcpy` e operações atômicas —
-nada de alocar, travar ou imprimir. Alterações naquele caminho devem ser verificadas com
-`make cpp-asan`.
+`make test` inclui `clippy -D warnings` como gate, não como sugestão: o `unsafe` do HAL e do
+IOProc é onde moram os defeitos caros deste projeto, e `not_unsafe_ptr_arg_deref` existe
+exatamente para esta classe de código. Um teste que depende de fixture e não a encontra
+**reprova**, dizendo qual comando rodar — nunca passa por omissão.
+
+O IOProc roda em thread de tempo real: dentro dele só existem cópia de memória e operações
+atômicas — nada de alocar, travar ou imprimir. Toda operação crua ali está sob um bloco
+`unsafe` único, com os três invariantes que a sustentam escritos por extenso no topo de
+`rust/src/playback.rs`. Quem mexer naquele caminho começa por ler esse comentário.

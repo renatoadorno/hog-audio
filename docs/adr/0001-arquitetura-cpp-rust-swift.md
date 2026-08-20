@@ -4,7 +4,13 @@ Data: 2026-08-16
 
 ## Status
 
-Aceito.
+**Superseded pelo [ADR 0002](0002-consolidar-o-core-em-rust.md)** em 19/08/2026. O core não é
+mais C++: o port para Rust foi feito, provado bit-perfect contra o `ffmpeg`, e a interface
+gráfica foi construída sobre ele. O `cpp/` foi removido do repositório.
+
+Este documento fica pelo registro do raciocínio — em especial a regra de tempo real do IOProc,
+que continua valendo, e a alternativa "reescrever tudo em Rust", que ele deixou aberta e que o
+0002 exerceu.
 
 ## Contexto
 
