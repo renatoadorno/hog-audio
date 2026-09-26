@@ -3,9 +3,11 @@ RUST_BIN  := rust/target/release/hog-audio
 FFI_DIR   := apps/player/Sources/HogAudioFFI
 BIND_DIR  := apps/player/Sources/HogAudioBindings
 APP_DIR   := apps/player/HogAudio.app
+INSTALL_DIR ?= /Applications
+OPEN_APP   ?= 1
 
 .PHONY: all rust fmt fmt-check lint rust-test hw-test bindings swift-test test fixtures \
-        icon verify verify-pause verify-volume info play app run-app clean
+        icon verify verify-pause verify-volume info play app install-app update-app run-app clean
 
 all: rust
 
@@ -108,6 +110,13 @@ app: bindings
 	@cp apps/player/Resources/AppIcon.icns $(APP_DIR)/Contents/Resources/
 	@cp apps/player/.build/release/HogPlayer $(APP_DIR)/Contents/MacOS/HogAudio
 	@echo "app montado em $(APP_DIR)"
+
+# Builda e instala em /Applications. O mesmo alvo serve para a primeira instalação e para
+# atualizações; INSTALL_DIR=$$HOME/Applications instala só para o usuário atual.
+install-app:
+	@HOG_AUDIO_INSTALL_DIR="$(INSTALL_DIR)" OPEN_APP="$(OPEN_APP)" ./tools/install_app.sh
+
+update-app: install-app
 
 # O .icns é versionado; só rode isto depois de mexer no SVG. Precisa de rsvg-convert.
 icon:
