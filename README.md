@@ -91,6 +91,51 @@ coisa, e é o que este programa evita:
 Para arquivos acima de 24 bits o programa recusa o formato float32, porque aí a conversão
 deixaria de ser exata.
 
+## Afinação (`--tuning`)
+
+Um segundo modo de reprodução, que aplica uma curva de resposta em frequência sua. **Ligado,
+a saída deixa de ser bit-perfect** — aplicar um filtro é mudar cada amostra. O hog mode e o
+rate travado no arquivo continuam valendo nos dois modos.
+
+```
+--tuning curves/dourada.curve
+```
+
+A curva é um arquivo de texto com uma frequência e um ganho por linha, separados por espaço,
+vírgula ou ponto e vírgula. `#` comenta. CSV exportado de medição funciona direto — a linha de
+cabeçalho é ignorada:
+
+```
+# frequência (Hz)   ganho (dB)
+20      12.5
+1000    -0.6
+3200    10.0
+20000  -10.6
+```
+
+Toda execução diz em que modo está, com ou sem a flag:
+
+```
+afinação : 56 pontos, 20-20000 Hz, preamp -12.6 dB
+afinação : desligada — saída bit-perfect
+```
+
+O **preamp** não é opcional: ganho positivo em digital satura, então a curva inteira desce até
+o pico encostar em 0 dBFS. O timbre é o mesmo — o que define o som é a forma da curva, não a
+altura absoluta — e o volume perdido se recupera no controle do device.
+
+O filtro é um FIR de fase mínima de 4096 taps, desenhado pelo cepstro real da curva. Fase
+mínima, e não linear, porque fase linear espalha energia *antes* do transiente, o que se ouve
+como um sopro à frente da batida. A resposta realizada fica dentro de **0,02 dB** da curva
+pedida em toda a banda audível, e o filtro é desenhado em ~10 ms na carga da faixa.
+
+Quando o device é inteiro, a volta de float para o formato dele usa **dither TPDF**. Truncar
+direto produziria distorção correlacionada com o sinal, que aparece como aspereza nas
+passagens baixas em vez de chiado.
+
+Os dois modos são caminhos separados no código: o bit-perfect não passa por nenhuma linha da
+afinação. Ver [ADR 0001 do core](rust/docs/adr/0001-modo-afinado-ao-lado-do-bit-perfect.md).
+
 ## Proteção contra ruído
 
 Se o formato que o decodificador produz não for exatamente o que o DAC espera, o resultado
@@ -127,7 +172,9 @@ alterado, corrigível tocando qualquer outra coisa ou pelo Configuração de Áu
   mas não há ganho de tensão para fones pesados.
 - **Sem resample, por escolha**: um arquivo de 192 kHz num device que vai até 96 kHz é
   recusado, com a lista de rates suportados.
-- **Uma faixa por vez**, sem playlist, seek ou pausa.
+- **Fila de reprodução**, com Previous/Next, auto-avanço e pausa. Seek continua fora de escopo.
+- **Trocar de modo reinicia a faixa**: o formato de entrega é decidido na partida do stream, e
+  retomar da posição atual depende de `ExtAudioFileSeek`, que ainda não existe.
 - O device é escolhido no início da reprodução. Plugar um fone no meio da faixa não migra o
   áudio, porque o device já está tomado.
 
@@ -142,6 +189,21 @@ make app
 open apps/player/HogAudio.app
 ```
 
+Para buildar e instalar — ou atualizar depois de novas alterações — em `/Applications`:
+
+```
+make install-app
+# `make update-app` é um alias equivalente
+```
+
+O alvo encerra com segurança uma versão aberta, substitui o bundle e abre a versão nova. Para
+instalar apenas para o usuário atual ou não abrir ao terminar:
+
+```
+make install-app INSTALL_DIR="$HOME/Applications"
+make install-app OPEN_APP=0
+```
+
 Ou já com uma faixa:
 
 ```
@@ -152,10 +214,11 @@ Não há entitlement de sandbox de propósito: hog mode não sobrevive a ele, o 
 da App Store — não é objetivo deste projeto. Também não há assinatura de código nem ícone
 customizado (YAGNI).
 
-**O que o player faz:** abrir um arquivo (painel ou arrastar), tocar, pausar, ajustar o volume
-e mostrar título, artista, álbum e capa quando embutida.
+**O que o player faz:** abrir arquivos ou pastas (painel ou arrastar), manter uma fila, navegar,
+avançar automaticamente, tocar, pausar, ajustar o volume e mostrar título, artista, álbum e
+capa quando embutida.
 
-**O que ele não faz:** sem seek, sem lista de reprodução — uma faixa por vez.
+**O que ele não faz:** sem seek, shuffle, repeat ou reordenação da fila.
 
 **Comportamentos que são decisão, não defeito:**
 
