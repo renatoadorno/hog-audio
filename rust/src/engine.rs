@@ -5,14 +5,21 @@
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 use std::thread::JoinHandle;
+use std::time::Instant;
 
 use coreaudio_sys::AudioStreamBasicDescription;
+
+use crate::tuning::curve::Curve;
+use crate::tuning::design::{DEFAULT_TAPS, design};
+use crate::tuning::process::Processor;
+use crate::tuning::quantize::{OutputFormat, Quantizer};
 
 use crate::device::{HoggedDevice, OutputDevice, query_default_output_device};
 use crate::format::{self, Decision, SampleRateRange};
 use crate::playback::Playback;
 use crate::source::AudioSource;
 use crate::status::SharedStatus;
+use crate::timings::{Phase, PhaseTimings, TimingLog};
 use crate::transitions::{Command, PlayerState, next_state};
 use crate::volume::{VolumeRequest, VolumeUnit, apply_ceiling};
 
@@ -55,27 +62,48 @@ pub struct DeviceReport {
     pub duplicate_mono_to_stereo: bool,
 }
 
-/// Origem de uma falha de `play`: transição de estado inválida (o usuário precisa mudar o que
-/// pediu — recarregar, por exemplo) ou falha ao tomar/reconfigurar o hardware. A CLI não
-/// precisa da distinção (`play` achata as duas em `String`), mas a fronteira uniffi ramifica
-/// sobre isso — daí `pub(crate)` em vez de inflar a API pública do `Engine` com um tipo de
-/// erro novo só para quem está do outro lado do FFI.
+/// Origem de uma falha de `play`: transição inválida, problema da faixa/decodificador ou falha
+/// ao tomar/reconfigurar o hardware. A CLI achata as três em `String`, mas a fronteira uniffi
+/// usa a distinção para decidir se o auto-avanço deve marcar e pular uma faixa.
 pub(crate) enum PlayFailure {
     State(String),
+    Track(String),
     Device(String),
 }
 
 impl PlayFailure {
     fn into_message(self) -> String {
         match self {
-            PlayFailure::State(message) | PlayFailure::Device(message) => message,
+            PlayFailure::State(message)
+            | PlayFailure::Track(message)
+            | PlayFailure::Device(message) => message,
         }
     }
+}
+
+pub(crate) enum LoadFailure {
+    Track(String),
+    Device(String),
+}
+
+impl LoadFailure {
+    fn into_message(self) -> String {
+        match self {
+            LoadFailure::Track(message) | LoadFailure::Device(message) => message,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct QueueEntry {
+    pub path: String,
+    pub failure: Option<String>,
 }
 
 pub struct Engine {
     status: Arc<SharedStatus>,
     inner: Mutex<EngineInner>,
+    timings: TimingLog,
 }
 
 struct EngineInner {
@@ -90,8 +118,11 @@ struct EngineInner {
     producer: Option<JoinHandle<()>>,
     stop_producer: Arc<AtomicBool>,
     volume: Option<VolumeRequest>,
+    tuning: Option<Curve>,
     ceiling: f64,
     volume_outcome: Option<VolumeOutcome>,
+    queue: Vec<QueueEntry>,
+    current_index: Option<usize>,
 }
 
 impl Engine {
@@ -110,10 +141,24 @@ impl Engine {
                 producer: None,
                 stop_producer: Arc::new(AtomicBool::new(false)),
                 volume: None,
+                tuning: None,
                 ceiling: DEFAULT_CEILING,
                 volume_outcome: None,
+                queue: Vec::new(),
+                current_index: None,
             }),
+            timings: TimingLog::default(),
         }
+    }
+
+    /// Zera a medição: cada comando da interface é uma transição, e as etapas dele somam.
+    pub fn reset_timings(&self) {
+        self.timings.reset();
+    }
+
+    /// Nunca espera o lock do engine: a medição tem mutex próprio.
+    pub fn timings(&self) -> PhaseTimings {
+        self.timings.snapshot()
     }
 
     /// Um pânico dentro de um comando não pode deixar o player inutilizável para sempre: o
@@ -145,6 +190,21 @@ impl Engine {
 
     /// Define o volume aplicado quando o device for adquirido. `None` mantém o volume atual,
     /// respeitando o teto.
+    /// Liga a afinação com `curve`, ou desliga com `None`. Vale a partir do próximo `play`:
+    /// o formato de entrega do decodificador é decidido na partida do stream, e trocá-lo com
+    /// o device já tocando é o mesmo que mudar o formato debaixo do IOProc.
+    ///
+    /// A curva fica como veio. A normalização que impede o ganho positivo de saturar acontece
+    /// no desenho do filtro: guardar já normalizada apagaria o preamp, que é justamente o
+    /// número que diz quanto a curva pediu a mais do que cabe.
+    pub fn set_tuning(&self, curve: Option<Curve>) {
+        self.lock().tuning = curve;
+    }
+
+    pub fn tuning(&self) -> Option<Curve> {
+        self.lock().tuning.clone()
+    }
+
     pub fn set_requested_volume(&self, volume: Option<VolumeRequest>, ceiling: f64) {
         let mut inner = self.lock();
         inner.volume = volume;
@@ -174,9 +234,17 @@ impl Engine {
     }
 
     pub fn load(&self, path: &str) -> Result<LoadedTrack, String> {
+        self.load_classified(path)
+            .map_err(LoadFailure::into_message)
+    }
+
+    pub(crate) fn load_classified(&self, path: &str) -> Result<LoadedTrack, LoadFailure> {
         // Abrir o arquivo primeiro, antes de descartar o que estava carregado: se o caminho
         // for inválido, o player continua exatamente como estava.
-        let source = AudioSource::open(path)?;
+        let opening = Instant::now();
+        let opened = AudioSource::open(path);
+        self.timings.record(Phase::Open, opening);
+        let source = opened.map_err(LoadFailure::Track)?;
         let file_format = source.format();
         let codec = source.codec_name().to_string();
         let total_frames = source.total_frames();
@@ -204,11 +272,11 @@ impl Engine {
         // faixa que já estava carregada e tocável.
         let device = match held_device {
             Some(device) => device,
-            None => query_default_output_device()?,
+            None => query_default_output_device().map_err(LoadFailure::Device)?,
         };
         let decision = format::negotiate(&file_format, &device.caps);
         if !decision.play {
-            return Err(decision.reason);
+            return Err(LoadFailure::Track(decision.reason));
         }
 
         let mut inner = self.lock();
@@ -216,7 +284,9 @@ impl Engine {
         // responsabilidade só de `stop_and_release`, chamada aqui explicitamente por quem
         // precisa dela (o erro é descartado pelo mesmo motivo de sempre: uma restauração que
         // falhou não pode impedir a carga de uma faixa nova).
+        let releasing = Instant::now();
         let _ = self.stop_and_release(&mut inner);
+        self.timings.record(Phase::Release, releasing);
         self.teardown(&mut inner);
 
         let device_name = device.name.clone();
@@ -225,7 +295,8 @@ impl Engine {
         // dispararia *depois* de `teardown` já ter apagado a faixa anterior — exatamente o bug
         // que o comentário acima de `stop_and_release`/`teardown` existe para evitar. Quem
         // tornar `Load` falível precisa mover esta checagem para antes do teardown.
-        let target = next_state(inner.state, Command::Load).map_err(|e| e.message.to_string())?;
+        let target = next_state(inner.state, Command::Load)
+            .map_err(|e| LoadFailure::Track(e.message.to_string()))?;
 
         inner.path = Some(path.to_string());
         inner.source = Some(source);
@@ -244,6 +315,109 @@ impl Engine {
             device_name,
             total_seconds: self.status.total_seconds(),
         })
+    }
+
+    pub(crate) fn append_tracks(&self, paths: Vec<String>) -> usize {
+        if paths.is_empty() {
+            return 0;
+        }
+        let count = paths.len();
+        let mut inner = self.lock();
+        inner.queue.extend(paths.into_iter().map(|path| QueueEntry {
+            path,
+            failure: None,
+        }));
+        self.status
+            .set_queue_state(inner.current_index, inner.queue.len());
+        self.status.bump_queue_version();
+        count
+    }
+
+    pub(crate) fn queue_entries(&self) -> Vec<QueueEntry> {
+        self.lock().queue.clone()
+    }
+
+    /// Nunca bloqueia, pelo mesmo motivo do `poll_finished`: a interface lê a fila na main
+    /// thread, e um comando restaurando ou adquirindo o device segura o lock por segundos.
+    /// `None` quer dizer "ocupado agora"; quem chama tenta de novo depois.
+    pub(crate) fn try_queue_entries(&self) -> Option<Vec<QueueEntry>> {
+        self.try_lock().map(|inner| inner.queue.clone())
+    }
+
+    pub(crate) fn queue_position(&self) -> (Option<usize>, usize) {
+        let inner = self.lock();
+        (inner.current_index, inner.queue.len())
+    }
+
+    pub(crate) fn queue_path(&self, index: usize) -> Option<String> {
+        self.lock().queue.get(index).map(|entry| entry.path.clone())
+    }
+
+    pub(crate) fn set_current_index(&self, index: Option<usize>) {
+        let mut inner = self.lock();
+        inner.current_index = index;
+        self.status.set_queue_state(index, inner.queue.len());
+    }
+
+    pub(crate) fn mark_queue_failure(&self, index: usize, failure: Option<String>) {
+        let mut inner = self.lock();
+        let Some(entry) = inner.queue.get_mut(index) else {
+            return;
+        };
+        if entry.failure == failure {
+            return;
+        }
+        entry.failure = failure;
+        self.status.bump_queue_version();
+    }
+
+    pub(crate) fn failed_tracks(&self) -> Vec<bool> {
+        self.lock()
+            .queue
+            .iter()
+            .map(|entry| entry.failure.is_some())
+            .collect()
+    }
+
+    pub(crate) fn remove_queue_entry(&self, index: usize) -> Result<(bool, Option<usize>), String> {
+        let mut inner = self.lock();
+        if index >= inner.queue.len() {
+            return Err("índice da fila fora do intervalo".to_string());
+        }
+        inner.queue.remove(index);
+        let (current, reload) =
+            crate::queue::after_removal(inner.current_index, index, inner.queue.len());
+        let removed_current = inner.current_index == Some(index);
+        inner.current_index = current;
+        self.status.set_queue_state(current, inner.queue.len());
+        self.status.bump_queue_version();
+        Ok((removed_current && reload, current))
+    }
+
+    pub(crate) fn clear_queue_entries(&self) {
+        let mut inner = self.lock();
+        if inner.queue.is_empty() && inner.current_index.is_none() {
+            return;
+        }
+        inner.queue.clear();
+        inner.current_index = None;
+        self.status.set_queue_state(None, 0);
+        self.status.bump_queue_version();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn force_finished_for_test(&self) {
+        if let Some(playback) = self.lock().playback.as_ref() {
+            playback
+                .finished
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+        self.poll_finished();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn current_device_id_for_test(&self) -> Option<u32> {
+        self.lock().device.as_ref().map(|device| device.id)
     }
 
     pub fn play(&self) -> Result<(), String> {
@@ -269,9 +443,7 @@ impl Engine {
                 })?;
                 hogged.resume().map_err(PlayFailure::Device)?;
             }
-            PlayerState::Loaded | PlayerState::Finished => self
-                .start_common(&mut inner, true)
-                .map_err(PlayFailure::Device)?,
+            PlayerState::Loaded | PlayerState::Finished => self.start_common(&mut inner, true)?,
             // O `next_state` acima já teria retornado erro para Play a partir de Idle ou
             // Failed. Um wildcard aqui esconderia uma variante nova de `PlayerState` caindo
             // silenciosamente em `start_common`; exaustivo, o compilador força revisar este
@@ -363,7 +535,11 @@ impl Engine {
         restore
     }
 
-    fn start_common(&self, inner: &mut EngineInner, attach_io_proc: bool) -> Result<(), String> {
+    fn start_common(
+        &self,
+        inner: &mut EngineInner,
+        attach_io_proc: bool,
+    ) -> Result<(), PlayFailure> {
         // Incondicional, mesmo vindo de Loaded (onde nada está retido — vira no-op). O match
         // de `play()` só chega aqui a partir de Loaded ou Finished; vindo de Finished um
         // HoggedDevice antigo pode continuar registrado (o fim da faixa só chama
@@ -371,15 +547,19 @@ impl Engine {
         // hog/rate/formato por cima do que a acquire() nova ainda vai gravar como "original",
         // e o Drop do antigo revogaria hog mode e reverteria rate/formato por baixo de uma
         // sessão que se acredita exclusiva — tudo retornando noErr, sem nenhum sinal de erro.
+        let releasing = Instant::now();
         let _ = self.stop_and_release(inner);
+        self.timings.record(Phase::Release, releasing);
 
         // Recarrega do início: vindo de Finished o decodificador já se esgotou, e mesmo
         // vindo de Loaded é preciso um AudioSource que possa ser movido para a produtora.
         let path = inner
             .path
             .clone()
-            .ok_or_else(|| "nenhum arquivo carregado".to_string())?;
-        let mut source = AudioSource::open(&path)?;
+            .ok_or_else(|| PlayFailure::State("nenhum arquivo carregado".to_string()))?;
+        let reopening = Instant::now();
+        let mut source = AudioSource::open(&path).map_err(PlayFailure::Track)?;
+        self.timings.record(Phase::Reopen, reopening);
         let file_format = source.format();
 
         // Os dados que o resto da função precisa são copiados aqui para que os empréstimos
@@ -388,15 +568,19 @@ impl Engine {
         let device = inner
             .device
             .as_ref()
-            .ok_or_else(|| "device não consultado".to_string())?;
+            .ok_or_else(|| PlayFailure::State("device não consultado".to_string()))?;
         let decision = inner
             .decision
             .as_ref()
-            .ok_or_else(|| "formato não negociado".to_string())?;
+            .ok_or_else(|| PlayFailure::State("formato não negociado".to_string()))?;
 
         let mut hogged = HoggedDevice::new();
         let physical = device.physical_formats[decision.physical_format_index as usize];
-        hogged.acquire(device, decision.sample_rate, &physical)?;
+        let acquiring = Instant::now();
+        hogged
+            .acquire(device, decision.sample_rate, &physical)
+            .map_err(PlayFailure::Device)?;
+        self.timings.record(Phase::Acquire, acquiring);
 
         // Dali em diante, nenhum erro pode propagar com um `?` solto: `hogged` ainda é local,
         // não movida para `inner.hogged`, e um `?` a derrubaria — o `Drop::restore()` rodaria,
@@ -409,18 +593,22 @@ impl Engine {
         // para garantir que o fone não receba o volume anterior. A publicação no
         // `SharedStatus` fica para o fim da função — ver o comentário perto de
         // `self.status.set_volume` mais abaixo.
+        let applying_volume = Instant::now();
         let outcome = match apply_volume(&mut hogged, device, inner.volume.as_ref(), inner.ceiling)
         {
             Ok(outcome) => outcome,
-            Err(error) => return Err(finish_with_error(hogged, error)),
+            Err(error) => {
+                return Err(PlayFailure::Device(finish_with_error(hogged, error)));
+            }
         };
+        self.timings.record(Phase::Volume, applying_volume);
 
         let stream = hogged.stream_format();
         if stream.mFormatID != coreaudio_sys::kAudioFormatLinearPCM {
-            return Err(finish_with_error(
+            return Err(PlayFailure::Device(finish_with_error(
                 hogged,
                 "o device não está em PCM linear; não vou alimentá-lo".to_string(),
-            ));
+            )));
         }
 
         let (client, non_interleaved) = crate::engine::client_format_for(&stream);
@@ -430,24 +618,34 @@ impl Engine {
             client.mChannelsPerFrame,
         );
         if !check.ok {
-            return Err(finish_with_error(
+            return Err(PlayFailure::Device(finish_with_error(
                 hogged,
                 format!("formato de entrega inconsistente: {}", check.reason),
-            ));
+            )));
         }
 
-        if let Err(error) = source.set_client_format(&client) {
-            return Err(finish_with_error(hogged, error));
+        // A afinação muda o que o decodificador entrega: float32, para o filtro trabalhar sem
+        // desempacotar inteiro e sem perder resolução no caminho. Sem afinação a entrega
+        // continua sendo exatamente o formato do device, e nenhum byte é tocado entre o
+        // decodificador e o DAC.
+        let tuning = inner.tuning.clone();
+        let delivery = match tuning {
+            Some(_) => float_delivery_for(&client),
+            None => client,
+        };
+
+        if let Err(error) = source.set_client_format(&delivery) {
+            return Err(PlayFailure::Track(finish_with_error(hogged, error)));
         }
 
         // O decodificador pode ajustar o que aceitou. Divergência aqui é a diferença entre
         // silêncio e ruído em volume total.
         let effective = match source.effective_client_format() {
             Ok(effective) => effective,
-            Err(error) => return Err(finish_with_error(hogged, error)),
+            Err(error) => return Err(PlayFailure::Track(finish_with_error(hogged, error))),
         };
-        if let Err(error) = crate::engine::assert_same_delivery(&effective, &client) {
-            return Err(finish_with_error(hogged, error));
+        if let Err(error) = crate::engine::assert_same_delivery(&effective, &delivery) {
+            return Err(PlayFailure::Track(finish_with_error(hogged, error)));
         }
 
         let ring_bytes = client.mSampleRate as usize * client.mBytesPerFrame as usize * 2;
@@ -460,27 +658,42 @@ impl Engine {
             Arc::clone(&self.status),
         ));
 
+        let tuned = match tuning {
+            None => None,
+            Some(curve) => {
+                match build_tuning(&curve, &client) {
+                    Ok(pair) => Some(pair),
+                    // Filtro que não se desenha é erro de partida, não de faixa: o arquivo
+                    // está bom, quem não serve é a curva ou o formato do device.
+                    Err(error) => {
+                        return Err(PlayFailure::Device(finish_with_error(hogged, error)));
+                    }
+                }
+            }
+        };
+
         let stop = Arc::new(AtomicBool::new(false));
         let producer = {
             let playback = Arc::clone(&playback);
             let stop = Arc::clone(&stop);
-            let bytes_per_frame = client.mBytesPerFrame as usize;
+            let status = Arc::clone(&self.status);
+            let device_bytes_per_frame = client.mBytesPerFrame as usize;
+            let channels = client.mChannelsPerFrame as usize;
             std::thread::spawn(move || {
-                let mut chunk = vec![0u8; 64 * 1024];
-                let frames_per_chunk = (chunk.len() / bytes_per_frame) as u32;
-                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
-                    let got = source.read(&mut chunk, frames_per_chunk);
-                    if got == 0 {
-                        break;
-                    }
-                    let bytes = got as usize * bytes_per_frame;
-                    let mut written = 0usize;
-                    while written < bytes && !stop.load(std::sync::atomic::Ordering::Relaxed) {
-                        written += playback.ring.write(&chunk[written..bytes]);
-                        if written < bytes {
-                            std::thread::sleep(std::time::Duration::from_millis(5));
-                        }
-                    }
+                match tuned {
+                    None => produce_direct(&mut source, &playback, &stop, device_bytes_per_frame),
+                    Some((processor, quantizer)) => produce_tuned(
+                        &mut source,
+                        &playback,
+                        &stop,
+                        &status,
+                        TunedProduction {
+                            processor,
+                            quantizer,
+                            channels,
+                            device_bytes_per_frame,
+                        },
+                    ),
                 }
                 playback
                     .producer_done
@@ -489,6 +702,7 @@ impl Engine {
         };
 
         // Deixa o buffer encher antes de abrir o fluxo, para o começo não sair picotado.
+        let prefilling = Instant::now();
         let half = playback.ring.capacity() / 2;
         for _ in 0..200 {
             if playback.ring.available_to_read() >= half
@@ -500,6 +714,7 @@ impl Engine {
             }
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
+        self.timings.record(Phase::Prefill, prefilling);
 
         // O modo dump usa exatamente este mesmo caminho, sem só esta última etapa: assim ele
         // percorre decodificador, ring buffer e alinhamento de frame, que é onde estiveram os
@@ -512,14 +727,16 @@ impl Engine {
             // (nenhum callback novo depois disso) e só então junta a produtora e zera
             // `inner.playback`, então o ponteiro nunca é lido depois do `Arc` cair.
             let context = Arc::as_ptr(&playback) as *mut std::ffi::c_void;
+            let starting = Instant::now();
             let started = unsafe { hogged.start(Some(crate::playback::io_proc), context) };
+            self.timings.record(Phase::Start, starting);
             if let Err(error) = started {
                 // A produtora e o pré-buffer já rodaram; sem isto, ninguém mais teria a flag
                 // `stop` para sinalizar parada, e a thread giraria para sempre enchendo um
                 // ring buffer que nenhum consumidor vai esvaziar.
                 stop.store(true, std::sync::atomic::Ordering::Relaxed);
                 let _ = producer.join();
-                return Err(finish_with_error(hogged, error));
+                return Err(PlayFailure::Device(finish_with_error(hogged, error)));
             }
         }
 
@@ -541,7 +758,8 @@ impl Engine {
     pub fn start_offline(&self) -> Result<(Arc<Playback>, AudioStreamBasicDescription), String> {
         let mut inner = self.lock();
         let target = next_state(inner.state, Command::Play).map_err(|e| e.message.to_string())?;
-        self.start_common(&mut inner, false)?;
+        self.start_common(&mut inner, false)
+            .map_err(PlayFailure::into_message)?;
         let playback = inner
             .playback
             .clone()
@@ -617,6 +835,188 @@ fn finish_with_error(mut hogged: HoggedDevice, error: String) -> String {
 /// O tamanho do frame vem do próprio device, nunca de bitsPerChannel/8: um formato pode
 /// carregar amostras de 24 bits em containers de 32, e presumir empacotamento faria o
 /// decodificador produzir um passo e o IOProc ler outro — ruído branco, não música.
+/// Quantos frames a produtora processa por vez no modo afinado. Não é latência de saída — o
+/// ring buffer fica entre isto e o DAC — só o tamanho do bloco da convolução.
+const TUNED_BLOCK_FRAMES: usize = 8192;
+
+struct TunedProduction {
+    processor: Processor,
+    quantizer: Quantizer,
+    channels: usize,
+    device_bytes_per_frame: usize,
+}
+
+/// Entrega em float32 intercalado, mantendo taxa e canais do device. É o formato em que o
+/// filtro trabalha; o que sai dele volta para o formato do device no `Quantizer`.
+fn float_delivery_for(client: &AudioStreamBasicDescription) -> AudioStreamBasicDescription {
+    let mut delivery = *client;
+    delivery.mFormatFlags = coreaudio_sys::kAudioFormatFlagIsFloat
+        | coreaudio_sys::kAudioFormatFlagIsPacked
+        | coreaudio_sys::kAudioFormatFlagsNativeEndian;
+    delivery.mBitsPerChannel = 32;
+    delivery.mBytesPerFrame = 4 * client.mChannelsPerFrame;
+    delivery.mBytesPerPacket = delivery.mBytesPerFrame;
+    delivery.mFramesPerPacket = 1;
+    delivery
+}
+
+/// O formato de destino da requantização, lido do que o device de fato publica — nunca
+/// deduzido de `bitsPerChannel / 8`, porque amostras de 24 bits moram em containers de 32.
+fn output_format_for(client: &AudioStreamBasicDescription) -> OutputFormat {
+    let is_float = client.mFormatFlags & coreaudio_sys::kAudioFormatFlagIsFloat != 0;
+    OutputFormat {
+        sample_type: if is_float {
+            crate::format::SampleType::Float
+        } else {
+            crate::format::SampleType::Integer
+        },
+        bits_per_channel: client.mBitsPerChannel,
+        bytes_per_sample: client.mBytesPerFrame / client.mChannelsPerFrame,
+    }
+}
+
+fn build_tuning(
+    curve: &Curve,
+    client: &AudioStreamBasicDescription,
+) -> Result<(Processor, Quantizer), String> {
+    // Normaliza aqui, e não na entrada: ganho positivo em digital satura, e o único jeito de
+    // realizar a forma da curva é descer tudo até o pico encostar em 0 dBFS.
+    let fir = design(&curve.normalized(), client.mSampleRate, DEFAULT_TAPS)?;
+    let processor = Processor::new(&fir, client.mChannelsPerFrame as usize, TUNED_BLOCK_FRAMES)?;
+    // A semente vem do relógio para que duas execuções não somem exatamente o mesmo ruído de
+    // dither ao mesmo material — o que o tornaria, na prática, parte do sinal.
+    let seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0x2545_F491_4F6C_DD1D);
+    let quantizer = Quantizer::new(output_format_for(client), seed)?;
+    Ok((processor, quantizer))
+}
+
+/// Escreve tudo no ring, cedendo a vez enquanto o consumidor não abre espaço. Devolve `false`
+/// se a parada foi pedida no meio.
+fn write_all_to_ring(playback: &Playback, stop: &AtomicBool, bytes: &[u8]) -> bool {
+    let mut written = 0usize;
+    while written < bytes.len() {
+        if stop.load(std::sync::atomic::Ordering::Relaxed) {
+            return false;
+        }
+        written += playback.ring.write(&bytes[written..]);
+        if written < bytes.len() {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+    true
+}
+
+/// Modo bit-perfect: do decodificador para o ring, sem tocar em nenhum byte.
+fn produce_direct(
+    source: &mut AudioSource,
+    playback: &Playback,
+    stop: &AtomicBool,
+    bytes_per_frame: usize,
+) {
+    let mut chunk = vec![0u8; 64 * 1024];
+    let frames_per_chunk = (chunk.len() / bytes_per_frame) as u32;
+    while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+        let got = source.read(&mut chunk, frames_per_chunk);
+        if got == 0 {
+            break;
+        }
+        let bytes = got as usize * bytes_per_frame;
+        if !write_all_to_ring(playback, stop, &chunk[..bytes]) {
+            return;
+        }
+    }
+}
+
+/// Modo afinado: decodificador em float32, filtro, volta ao formato do device, ring.
+fn produce_tuned(
+    source: &mut AudioSource,
+    playback: &Playback,
+    stop: &AtomicBool,
+    status: &SharedStatus,
+    mut production: TunedProduction,
+) {
+    let channels = production.channels;
+    let mut raw = vec![0u8; TUNED_BLOCK_FRAMES * channels * 4];
+    let mut samples = vec![0f32; TUNED_BLOCK_FRAMES * channels];
+    let mut out = vec![0u8; TUNED_BLOCK_FRAMES * production.device_bytes_per_frame];
+    let mut published_clips = 0u64;
+
+    loop {
+        if stop.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
+        let got = source.read(&mut raw, TUNED_BLOCK_FRAMES as u32);
+        if got == 0 {
+            break;
+        }
+        let count = got as usize * channels;
+        decode_float32(&raw[..count * 4], &mut samples[..count]);
+
+        if !filter_and_write(
+            playback,
+            stop,
+            &mut production,
+            &mut samples[..count],
+            &mut out,
+        ) {
+            return;
+        }
+        published_clips = publish_clips(status, &production, published_clips);
+    }
+
+    // A cauda é a resposta do filtro às últimas amostras da faixa. Sem drenar, o fim é cortado
+    // — não o silêncio depois dele, mas o decaimento das últimas notas.
+    let tail = production.processor.tail_frames();
+    let mut drained = 0usize;
+    while drained < tail {
+        let frames = (tail - drained).min(TUNED_BLOCK_FRAMES);
+        let count = frames * channels;
+        production.processor.drain_tail(&mut samples[..count]);
+        let Ok(bytes) = production.quantizer.write(&samples[..count], &mut out) else {
+            return;
+        };
+        if !write_all_to_ring(playback, stop, &out[..bytes]) {
+            return;
+        }
+        drained += frames;
+    }
+    publish_clips(status, &production, published_clips);
+}
+
+fn decode_float32(raw: &[u8], samples: &mut [f32]) {
+    let (words, _) = raw.as_chunks::<4>();
+    for (sample, bytes) in samples.iter_mut().zip(words) {
+        *sample = f32::from_le_bytes(*bytes);
+    }
+}
+
+fn filter_and_write(
+    playback: &Playback,
+    stop: &AtomicBool,
+    production: &mut TunedProduction,
+    samples: &mut [f32],
+    out: &mut [u8],
+) -> bool {
+    if production.processor.process(samples).is_err() {
+        return false;
+    }
+    let Ok(bytes) = production.quantizer.write(samples, out) else {
+        return false;
+    };
+    write_all_to_ring(playback, stop, &out[..bytes])
+}
+
+fn publish_clips(status: &SharedStatus, production: &TunedProduction, published: u64) -> u64 {
+    let total = production.processor.clipped() + production.quantizer.clipped();
+    if total > published {
+        status.add_clipped(total - published);
+    }
+    total
+}
+
 pub(crate) fn client_format_for(
     stream: &AudioStreamBasicDescription,
 ) -> (AudioStreamBasicDescription, bool) {
@@ -760,6 +1160,19 @@ mod tests {
     }
 
     #[test]
+    fn ler_a_fila_nao_espera_um_comando_que_segura_o_engine() {
+        let engine = Engine::new();
+        engine.append_tracks(vec!["/tmp/a.flac".to_string()]);
+
+        // Um comando restaurando ou adquirindo o device segura este lock por segundos.
+        let comando = engine.lock();
+        assert!(engine.try_queue_entries().is_none());
+        drop(comando);
+
+        assert_eq!(engine.try_queue_entries().map(|fila| fila.len()), Some(1));
+    }
+
+    #[test]
     fn arquivo_inexistente_falha_sem_mudar_de_estado() {
         // O arquivo é aberto antes de qualquer consulta ao device: um caminho inválido não
         // pode chegar perto do hardware.
@@ -786,6 +1199,58 @@ mod tests {
     fn shutdown_de_engine_parado_e_inofensivo() {
         let engine = Engine::new();
         assert!(engine.shutdown().is_ok());
+        assert_eq!(engine.state(), PlayerState::Idle);
+    }
+
+    #[test]
+    fn append_preserva_ordem_e_incrementa_versao_uma_vez() {
+        let engine = Engine::new();
+        assert_eq!(
+            engine.append_tracks(vec!["b.flac".to_string(), "a.wav".to_string()]),
+            2
+        );
+        assert_eq!(
+            engine.queue_entries(),
+            vec![
+                QueueEntry {
+                    path: "b.flac".to_string(),
+                    failure: None,
+                },
+                QueueEntry {
+                    path: "a.wav".to_string(),
+                    failure: None,
+                },
+            ]
+        );
+        assert_eq!(engine.status().queue_len(), 2);
+        assert_eq!(engine.status().queue_version(), 1);
+    }
+
+    #[test]
+    fn remover_fora_do_intervalo_nao_muda_a_fila() {
+        let engine = Engine::new();
+        engine.append_tracks(vec!["a.flac".to_string()]);
+        let before = engine.queue_entries();
+        let version = engine.status().queue_version();
+
+        assert!(engine.remove_queue_entry(7).is_err());
+        assert_eq!(engine.queue_entries(), before);
+        assert_eq!(engine.status().queue_version(), version);
+    }
+
+    #[test]
+    fn limpar_as_entradas_esvazia_a_fila_e_incrementa_a_versao() {
+        let engine = Engine::new();
+        engine.append_tracks(vec!["a.flac".to_string()]);
+        engine.set_current_index(Some(0));
+        let version = engine.status().queue_version();
+
+        engine.clear_queue_entries();
+
+        assert!(engine.queue_entries().is_empty());
+        assert_eq!(engine.status().current_index(), None);
+        assert_eq!(engine.status().queue_len(), 0);
+        assert_eq!(engine.status().queue_version(), version + 1);
         assert_eq!(engine.state(), PlayerState::Idle);
     }
 
@@ -1109,5 +1574,103 @@ mod tests {
             .shutdown()
             .expect("deveria restaurar o device depois da segunda reprodução");
         assert_eq!(engine.state(), PlayerState::Idle);
+    }
+}
+
+#[cfg(test)]
+mod tuning_tests {
+    use super::*;
+    use crate::tuning::curve::CurvePoint;
+
+    fn client_float32(channels: u32) -> AudioStreamBasicDescription {
+        AudioStreamBasicDescription {
+            mSampleRate: 48000.0,
+            mFormatID: coreaudio_sys::kAudioFormatLinearPCM,
+            mFormatFlags: coreaudio_sys::kAudioFormatFlagIsFloat
+                | coreaudio_sys::kAudioFormatFlagIsPacked,
+            mBytesPerPacket: 4 * channels,
+            mFramesPerPacket: 1,
+            mBytesPerFrame: 4 * channels,
+            mChannelsPerFrame: channels,
+            mBitsPerChannel: 32,
+            mReserved: 0,
+        }
+    }
+
+    fn client_int24_em_32(channels: u32) -> AudioStreamBasicDescription {
+        let mut client = client_float32(channels);
+        client.mFormatFlags = coreaudio_sys::kAudioFormatFlagIsSignedInteger;
+        client.mBitsPerChannel = 24;
+        client
+    }
+
+    fn curva(points: &[(f64, f64)]) -> Curve {
+        let points = points
+            .iter()
+            .map(|&(hz, db)| CurvePoint { hz, db })
+            .collect();
+        Curve::from_points(points).expect("curva do teste")
+    }
+
+    /// A entrega vira float32 quando a afinação está ligada, mantendo taxa e canais. Se voltasse
+    /// o formato do device, o filtro receberia inteiro empacotado e leria lixo como amostra.
+    #[test]
+    fn a_entrega_afinada_e_float32_com_os_canais_do_device() {
+        let delivery = float_delivery_for(&client_int24_em_32(2));
+
+        assert_eq!(delivery.mBitsPerChannel, 32);
+        assert_eq!(delivery.mBytesPerFrame, 8);
+        assert_eq!(delivery.mChannelsPerFrame, 2);
+        assert_eq!(delivery.mSampleRate, 48000.0);
+        assert!(delivery.mFormatFlags & coreaudio_sys::kAudioFormatFlagIsFloat != 0);
+    }
+
+    /// O container por canal vem de `mBytesPerFrame / canais`, nunca de `bits / 8`: 24 bits em
+    /// container de 32 é o caso comum, e deduzir empacotamento desloca cada amostra.
+    #[test]
+    fn o_formato_de_saida_sai_do_que_o_device_publica() {
+        let format = output_format_for(&client_int24_em_32(2));
+
+        assert_eq!(format.sample_type, crate::format::SampleType::Integer);
+        assert_eq!(format.bits_per_channel, 24);
+        assert_eq!(format.bytes_per_sample, 4);
+
+        let format = output_format_for(&client_float32(2));
+
+        assert_eq!(format.sample_type, crate::format::SampleType::Float);
+        assert_eq!(format.bytes_per_sample, 4);
+    }
+
+    /// Uma curva com ganho positivo tem de ser normalizada antes de virar filtro. Sem isso, o
+    /// grave levantado em 12 dB estoura o fundo de escala e o que chega ao DAC é distorção —
+    /// e nada no caminho reclamaria, porque saturar não é erro, é só som ruim.
+    #[test]
+    fn a_curva_e_normalizada_antes_de_virar_filtro() {
+        let client = client_float32(1);
+        let (mut processor, _) = build_tuning(&curva(&[(20.0, 12.0), (20000.0, 0.0)]), &client)
+            .expect("deveria montar a afinação");
+
+        // Senoide de 20 Hz, onde a curva pede os 12 dB, com folga de escala. Sem normalizar, o
+        // ganho de 4x levaria isto a 2,0 — o dobro do que cabe.
+        let mut samples: Vec<f32> = (0..4096)
+            .map(|n| {
+                let fase = 2.0 * std::f64::consts::PI * 20.0 * n as f64 / 48000.0;
+                0.5 * fase.sin() as f32
+            })
+            .collect();
+        processor.process(&mut samples).expect("deveria filtrar");
+
+        assert_eq!(processor.clipped(), 0, "a curva saturou o fundo de escala");
+        let pico = samples.iter().fold(0.0f32, |max, &v| max.max(v.abs()));
+        assert!(pico <= 0.55, "pico de {pico} acima do sinal de entrada");
+    }
+
+    #[test]
+    fn curva_impossivel_de_realizar_e_recusada_na_montagem() {
+        let mut client = client_float32(2);
+        client.mBitsPerChannel = 20; // fora do byte: o quantizador não tem o que fazer
+        client.mFormatFlags = coreaudio_sys::kAudioFormatFlagIsSignedInteger;
+
+        assert!(build_tuning(&curva(&[(20.0, 0.0), (20000.0, 0.0)]), &client).is_err());
     }
 }

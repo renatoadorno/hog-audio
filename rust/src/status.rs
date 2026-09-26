@@ -13,9 +13,13 @@ pub struct SharedStatus {
     state: AtomicU8,
     frames_rendered: AtomicU64,
     underruns: AtomicU64,
+    clipped: AtomicU64,
     total_frames: AtomicI64,
     sample_rate_bits: AtomicU64,
     volume_bits: AtomicU32,
+    current_index: AtomicU64,
+    queue_len: AtomicU32,
+    queue_version: AtomicU64,
 }
 
 fn state_to_u8(state: PlayerState) -> u8 {
@@ -46,9 +50,13 @@ impl SharedStatus {
             state: AtomicU8::new(state_to_u8(PlayerState::Idle)),
             frames_rendered: AtomicU64::new(0),
             underruns: AtomicU64::new(0),
+            clipped: AtomicU64::new(0),
             total_frames: AtomicI64::new(0),
             sample_rate_bits: AtomicU64::new(0f64.to_bits()),
             volume_bits: AtomicU32::new(0f32.to_bits()),
+            current_index: AtomicU64::new(u64::MAX),
+            queue_len: AtomicU32::new(0),
+            queue_version: AtomicU64::new(0),
         }
     }
 
@@ -74,6 +82,7 @@ impl SharedStatus {
     pub fn reset_progress(&self) {
         self.frames_rendered.store(0, Ordering::Release);
         self.underruns.store(0, Ordering::Release);
+        self.clipped.store(0, Ordering::Release);
     }
 
     /// Chamado pelo IOProc. `Relaxed` basta: ninguém sincroniza dados com este contador.
@@ -114,12 +123,48 @@ impl SharedStatus {
         self.underruns.load(Ordering::Relaxed)
     }
 
+    /// Amostras que a afinação levou além do fundo de escala. Diferente de underrun: não é
+    /// falha de alimentação, é sinal distorcido — e sem contador ninguém descobre, porque
+    /// clipping não interrompe nada, só soa pior.
+    pub fn add_clipped(&self, count: u64) {
+        self.clipped.fetch_add(count, Ordering::Relaxed);
+    }
+
+    pub fn clipped(&self) -> u64 {
+        self.clipped.load(Ordering::Relaxed)
+    }
+
     pub fn set_volume(&self, scalar: f32) {
         self.volume_bits.store(scalar.to_bits(), Ordering::Release);
     }
 
     pub fn volume(&self) -> f32 {
         f32::from_bits(self.volume_bits.load(Ordering::Acquire))
+    }
+
+    pub fn set_queue_state(&self, current: Option<usize>, len: usize) {
+        self.current_index.store(
+            current.map_or(u64::MAX, |index| index as u64),
+            Ordering::Release,
+        );
+        self.queue_len.store(len as u32, Ordering::Release);
+    }
+
+    pub fn current_index(&self) -> Option<u32> {
+        let index = self.current_index.load(Ordering::Acquire);
+        (index != u64::MAX).then_some(index as u32)
+    }
+
+    pub fn queue_len(&self) -> u32 {
+        self.queue_len.load(Ordering::Acquire)
+    }
+
+    pub fn bump_queue_version(&self) {
+        self.queue_version.fetch_add(1, Ordering::AcqRel);
+    }
+
+    pub fn queue_version(&self) -> u64 {
+        self.queue_version.load(Ordering::Acquire)
     }
 }
 
@@ -202,5 +247,19 @@ mod tests {
         let status = SharedStatus::new();
         status.set_volume(0.375);
         assert!((status.volume() - 0.375).abs() < 1e-6);
+    }
+
+    #[test]
+    fn estado_barato_da_fila_sobrevive_a_ida_e_volta() {
+        let status = SharedStatus::new();
+        assert_eq!(status.current_index(), None);
+        assert_eq!(status.queue_len(), 0);
+        assert_eq!(status.queue_version(), 0);
+
+        status.set_queue_state(Some(7), 12);
+        status.bump_queue_version();
+        assert_eq!(status.current_index(), Some(7));
+        assert_eq!(status.queue_len(), 12);
+        assert_eq!(status.queue_version(), 1);
     }
 }

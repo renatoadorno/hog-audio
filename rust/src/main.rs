@@ -8,6 +8,7 @@ use coreaudio_sys::{
 use hog_audio::engine::{DEFAULT_CEILING, DeviceReport, Engine, LoadedTrack, VolumeOutcome};
 use hog_audio::ring::aligned_read_size;
 use hog_audio::transitions::PlayerState;
+use hog_audio::tuning::curve::{Curve, parse as parse_curve};
 use hog_audio::volume::{VolumeRequest, VolumeUnit, parse_volume};
 
 const DUMP_BLOCK_FRAMES: usize = 512;
@@ -63,6 +64,25 @@ fn describe_format(f: &AudioStreamBasicDescription) -> String {
 /// negociado, mesmo fora de `--info` — é como se responde "por que este arquivo não toca" e
 /// "ele escolheu o formato físico certo". Fica fora de `print_track_report` de propósito:
 /// não é parte do que a interface gráfica vai consumir, só da CLI.
+/// Sem esta linha não há como saber, olhando a saída, se o que tocou passou pelo filtro ou
+/// foi entregue byte a byte — e essa é a diferença que o projeto inteiro existe para tornar
+/// explícita.
+fn print_tuning_report(curve: Option<&Curve>) {
+    match curve {
+        None => println!("afinação : desligada — saída bit-perfect"),
+        Some(curve) => {
+            let pontos = curve.points();
+            println!(
+                "afinação : {} pontos, {:.0}-{:.0} Hz, preamp {:.1} dB",
+                pontos.len(),
+                pontos[0].hz,
+                pontos[pontos.len() - 1].hz,
+                curve.preamp_db()
+            );
+        }
+    }
+}
+
 fn print_device_report(report: &DeviceReport) {
     println!("rate atual: {} Hz", report.nominal_rate as i64);
 
@@ -144,12 +164,14 @@ fn print_volume_outcome(outcome: &VolumeOutcome, explicit_request: bool, ceiling
 
 fn usage() -> i32 {
     eprint!(
-        "uso: hog-audio [--info] [--volume V] [--max-volume V] [--dump ARQUIVO] <arquivo>\n\n\
+        "uso: hog-audio [--info] [--volume V] [--max-volume V] [--tuning CURVA]\n\
+         \x20              [--dump ARQUIVO] <arquivo>\n\n\
          \x20 Reproduz o arquivo tomando o DAC em modo exclusivo, travado no sample\n\
          \x20 rate e no bit depth do próprio arquivo. Ctrl+C interrompe.\n\n\
          \x20 --info          mostra o que seria negociado, sem tocar no device\n\
          \x20 --volume V      volume da reprodução: 35, 35% ou -18dB\n\
          \x20 --max-volume V  teto aplicado quando --volume é omitido (padrão 50%)\n\
+         \x20 --tuning CURVA  aplica a curva de afinação; sem isto a saída é bit-perfect\n\
          \x20 --dump ARQUIVO  grava em disco os bytes que iriam ao DAC, sem tocar\n\
          \x20 --pause-at N    no modo dump, simula uma pausa depois de N frames\n\n\
          \x20 O volume é ajustado depois de tomar o device e antes de sair som, e é\n\
@@ -165,6 +187,7 @@ struct Options {
     ceiling: f64,
     dump: Option<String>,
     pause_at: Option<usize>,
+    tuning: Option<Curve>,
 }
 
 fn parse_args() -> Result<Options, i32> {
@@ -176,6 +199,7 @@ fn parse_args() -> Result<Options, i32> {
         ceiling: DEFAULT_CEILING,
         dump: None,
         pause_at: None,
+        tuning: None,
     };
 
     let mut i = 0;
@@ -191,6 +215,27 @@ fn parse_args() -> Result<Options, i32> {
                     return Err(2);
                 };
                 options.dump = Some(value.clone());
+            }
+            "--tuning" => {
+                i += 1;
+                let Some(value) = args.get(i) else {
+                    eprintln!("erro: --tuning exige o caminho de uma curva");
+                    return Err(2);
+                };
+                let text = match std::fs::read_to_string(value) {
+                    Ok(text) => text,
+                    Err(error) => {
+                        eprintln!("erro: não consegui ler {value}: {error}");
+                        return Err(2);
+                    }
+                };
+                match parse_curve(&text) {
+                    Ok(curve) => options.tuning = Some(curve),
+                    Err(error) => {
+                        eprintln!("erro: {value}: {error}");
+                        return Err(2);
+                    }
+                }
             }
             "--pause-at" => {
                 i += 1;
@@ -254,6 +299,7 @@ fn run() -> i32 {
 
     let engine = Engine::new();
     engine.set_requested_volume(options.volume.clone(), options.ceiling);
+    engine.set_tuning(options.tuning.clone());
 
     let track = match engine.load(&options.path) {
         Ok(track) => track,
@@ -267,6 +313,7 @@ fn run() -> i32 {
     if let Some(report) = engine.device_report() {
         print_device_report(&report);
     }
+    print_tuning_report(engine.tuning().as_ref());
     if options.info_only {
         return 0;
     }
