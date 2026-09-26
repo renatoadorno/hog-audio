@@ -30,9 +30,16 @@ private let tags = TrackMetadata(
     album: "Death of a Bachelor", artwork: nil
 )
 
-private func snap(_ state: PlayerState, elapsed: Double = 0, underruns: UInt64 = 0) -> Snapshot {
+private func snap(
+    _ state: PlayerState,
+    elapsed: Double = 0,
+    underruns: UInt64 = 0,
+    current: UInt32? = 0,
+    queueLen: UInt32 = 1
+) -> Snapshot {
     Snapshot(state: state, elapsedSeconds: elapsed, totalSeconds: 208.7,
-             underruns: underruns, volumeScalar: 0.5)
+             underruns: underruns, volumeScalar: 0.5,
+             currentIndex: current, queueLen: queueLen, queueVersion: 0)
 }
 
 @Test func tocandoMostraPausarEOProgresso() {
@@ -47,7 +54,8 @@ private func snap(_ state: PlayerState, elapsed: Double = 0, underruns: UInt64 =
 
 @Test func semFaixaCarregadaNaoDaParaTocar() {
     let vazio = Snapshot(state: .idle, elapsedSeconds: 0, totalSeconds: 0,
-                         underruns: 0, volumeScalar: 0.5)
+                         underruns: 0, volumeScalar: 0.5,
+                         currentIndex: nil, queueLen: 0, queueVersion: 0)
     let d = displayState(snapshot: vazio, metadata: nil, format: nil)
     #expect(!d.canPlay)
     #expect(!d.canPause)
@@ -101,4 +109,29 @@ private func snap(_ state: PlayerState, elapsed: Double = 0, underruns: UInt64 =
     // linha técnica não pode apagar o "hog ativo" justo no instante em que a surpresa de o
     // Mac continuar mudo é maior.
     #expect(d.technicalLine.contains("hog ativo"))
+}
+
+@Test func navegacaoRespeitaPontasERegraDosTresSegundos() {
+    let first = displayState(
+        snapshot: snap(.playing, elapsed: 2.9, current: 0, queueLen: 3),
+        metadata: tags,
+        format: faixa
+    )
+    #expect(!first.canGoPrevious)
+    #expect(first.canGoNext)
+
+    let rewind = displayState(
+        snapshot: snap(.playing, elapsed: 3.0, current: 0, queueLen: 3),
+        metadata: tags,
+        format: faixa
+    )
+    #expect(rewind.canGoPrevious)
+
+    let last = displayState(
+        snapshot: snap(.paused, current: 2, queueLen: 3),
+        metadata: tags,
+        format: faixa
+    )
+    #expect(last.canGoPrevious)
+    #expect(!last.canGoNext)
 }

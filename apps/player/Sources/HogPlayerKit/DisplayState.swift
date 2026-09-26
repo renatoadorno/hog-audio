@@ -13,20 +13,10 @@ public struct DisplayState: Equatable, Sendable {
     public let progress: Double
     public let canPlay: Bool
     public let canPause: Bool
+    public let canGoNext: Bool
+    public let canGoPrevious: Bool
     public let isPlaying: Bool
     public let technicalLine: String
-}
-
-/// A família 44,1/88,2/176,4 kHz (derivada de CD) tem casa decimal real; 48/96/192 são
-/// múltiplos redondos de 1000 e não têm. Suprimir a casa quando ela é zero evita "96.0 kHz"
-/// sem esconder "44.1 kHz" atrás de um arredondamento que mostraria "44 kHz" — informação
-/// errada num projeto que existe para ser transparente sobre o que chega ao DAC.
-private func formatSampleRate(_ hz: Double) -> String {
-    let khz = hz / 1000
-    if khz.truncatingRemainder(dividingBy: 1) == 0 {
-        return String(format: "%.0f kHz", khz)
-    }
-    return String(format: "%.1f kHz", khz)
 }
 
 /// Traduz o estado do engine para o que a tela mostra. É função pura de propósito: a interface
@@ -46,9 +36,11 @@ public func displayState(
     var tecnica = ""
     if let format {
         var partes = [
-            formatSampleRate(format.sampleRate),
-            "\(format.bitDepth) bit",
-            format.codec,
+            qualityDetail(
+                sampleRate: format.sampleRate,
+                bitDepth: format.bitDepth,
+                codec: format.codec
+            ),
         ]
         if comDevice { partes.append("hog ativo") }
         if snapshot.underruns > 0 { partes.append("\(snapshot.underruns) underruns") }
@@ -72,6 +64,10 @@ public func displayState(
         progress: progresso,
         canPlay: [.loaded, .paused, .finished].contains(snapshot.state),
         canPause: tocando,
+        canGoNext: snapshot.currentIndex.map { $0 + 1 < snapshot.queueLen } ?? false,
+        canGoPrevious: snapshot.currentIndex.map {
+            $0 > 0 || snapshot.elapsedSeconds >= 3.0
+        } ?? false,
         isPlaying: tocando,
         technicalLine: tecnica
     )

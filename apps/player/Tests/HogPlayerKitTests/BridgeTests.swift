@@ -11,8 +11,9 @@ import HogAudioBindings
 
 @Test func arquivoInexistenteLancaErroTipado() {
     let player = HogPlayer()
+    _ = player.appendTracks(paths: ["/tmp/nao-existe-mesmo-12345.flac"])
     do {
-        _ = try player.load(path: "/tmp/nao-existe-mesmo-12345.flac")
+        _ = try player.selectTrack(index: 0)
         Issue.record("deveria ter lançado")
     } catch let erro as PlayerError {
         guard case .Load = erro else {

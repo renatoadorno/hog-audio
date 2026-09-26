@@ -67,26 +67,6 @@ private func item(_ keySpace: String, _ key: String, _ value: String) -> Metadat
     #expect(meta.artwork == jpeg)
 }
 
-// Caminhos relativos a apps/player, que é de onde `swift test` roda. As fixtures não são
-// versionadas — `make fixtures` as gera, a partir da receita em `tools/make_fixtures.sh`.
-//
-// Um arquivo ausente **reprova** o teste, mesma política do lado Rust (`rust/src/fixtures.rs`).
-// Antes daqui saía um `.enabled(if:)`, que pulava calado: a suíte relatava sucesso sem ter
-// exercitado a leitura de metadados de verdade, que é justamente o que estes quatro testes
-// existem para cobrir.
-private func fixture(
-    _ name: String,
-    sourceLocation: SourceLocation = #_sourceLocation
-) throws -> URL {
-    let path = "../../testdata/\(name)"
-    try #require(
-        FileManager.default.fileExists(atPath: path),
-        "fixture ausente: \(path) — rode `make fixtures` na raiz do repositório",
-        sourceLocation: sourceLocation
-    )
-    return URL(fileURLWithPath: path)
-}
-
 // Os quatro testes abaixo cobrem o que os sintéticos de `org.id3`/`itsk` não cobrem: a função
 // `convert`, traduzindo `AVMetadataItem` que veio de um arquivo de verdade. Um formato por
 // teste, porque cada um guarda as tags de um jeito diferente — Vorbis comment no FLAC, átomos
