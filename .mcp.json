@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "mcp-server-macos-use": {
+      "command": "/Users/renatoadorno/work/ia-toolbox/mcp-server-macos-use/.build/debug/mcp-server-macos-use"
+    }
+  }
+}
