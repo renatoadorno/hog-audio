@@ -20,7 +20,9 @@ struct HogPlayerApp: App {
                     }
                 }
         }
-        .windowResizability(.contentSize)
+        // O conteúdo declara só o mínimo: acima dele a janela cresce e a capa acompanha.
+        .windowResizability(.contentMinSize)
+        .defaultSize(width: 920, height: 700)
     }
 }
 
