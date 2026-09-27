@@ -5,7 +5,8 @@
 //! O IOProc escreve `frames_rendered` e `underruns` daqui. Por isso tudo é atômico: são as
 //! únicas operações que um callback de tempo real pode fazer com segurança.
 
-use std::sync::atomic::{AtomicI64, AtomicU8, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU8, AtomicU32, AtomicU64, Ordering};
+use std::sync::{Mutex, PoisonError};
 
 use crate::transitions::PlayerState;
 
@@ -17,9 +18,14 @@ pub struct SharedStatus {
     total_frames: AtomicI64,
     sample_rate_bits: AtomicU64,
     volume_bits: AtomicU32,
+    muted: AtomicBool,
     current_index: AtomicU64,
     queue_len: AtomicU32,
     queue_version: AtomicU64,
+    device_suspect: AtomicBool,
+    problem_seq: AtomicU64,
+    /// Mutex próprio, que o IOProc nunca toca: só o engine escreve e só a interface lê.
+    problem: Mutex<Option<String>>,
 }
 
 fn state_to_u8(state: PlayerState) -> u8 {
@@ -53,10 +59,15 @@ impl SharedStatus {
             clipped: AtomicU64::new(0),
             total_frames: AtomicI64::new(0),
             sample_rate_bits: AtomicU64::new(0f64.to_bits()),
-            volume_bits: AtomicU32::new(0f32.to_bits()),
+            // Negativo é "sem volume": nada foi aplicado ainda.
+            volume_bits: AtomicU32::new((-1f32).to_bits()),
+            muted: AtomicBool::new(false),
             current_index: AtomicU64::new(u64::MAX),
             queue_len: AtomicU32::new(0),
             queue_version: AtomicU64::new(0),
+            device_suspect: AtomicBool::new(false),
+            problem_seq: AtomicU64::new(0),
+            problem: Mutex::new(None),
         }
     }
 
@@ -138,8 +149,19 @@ impl SharedStatus {
         self.volume_bits.store(scalar.to_bits(), Ordering::Release);
     }
 
-    pub fn volume(&self) -> f32 {
-        f32::from_bits(self.volume_bits.load(Ordering::Acquire))
+    /// `None` antes de haver device e para device sem controle de volume, que o engine
+    /// publica como escalar negativo.
+    pub fn volume(&self) -> Option<f32> {
+        let scalar = f32::from_bits(self.volume_bits.load(Ordering::Acquire));
+        (scalar >= 0.0).then_some(scalar)
+    }
+
+    pub fn set_muted(&self, muted: bool) {
+        self.muted.store(muted, Ordering::Release);
+    }
+
+    pub fn muted(&self) -> bool {
+        self.muted.load(Ordering::Acquire)
     }
 
     pub fn set_queue_state(&self, current: Option<usize>, len: usize) {
@@ -165,6 +187,42 @@ impl SharedStatus {
 
     pub fn queue_version(&self) -> u64 {
         self.queue_version.load(Ordering::Acquire)
+    }
+
+    /// Os frames que o IOProc entregou, sem o teto da duração: é o que prova que ele ainda
+    /// está sendo chamado.
+    pub fn frames_rendered(&self) -> u64 {
+        self.frames_rendered.load(Ordering::Relaxed)
+    }
+
+    /// Marcada pelo poll quando o device parece perdido; quem confirma e age é o `recover`.
+    pub fn set_device_suspect(&self, suspect: bool) {
+        self.device_suspect.store(suspect, Ordering::Release);
+    }
+
+    pub fn device_suspect(&self) -> bool {
+        self.device_suspect.load(Ordering::Acquire)
+    }
+
+    /// O texto primeiro e a sequência depois: quem vê a sequência nova já encontra o texto.
+    pub fn publish_problem(&self, message: String) {
+        *self.problem.lock().unwrap_or_else(PoisonError::into_inner) = Some(message);
+        self.problem_seq.fetch_add(1, Ordering::AcqRel);
+    }
+
+    pub fn clear_problem(&self) {
+        *self.problem.lock().unwrap_or_else(PoisonError::into_inner) = None;
+    }
+
+    pub fn problem_seq(&self) -> u64 {
+        self.problem_seq.load(Ordering::Acquire)
+    }
+
+    pub fn problem(&self) -> Option<String> {
+        self.problem
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 }
 
@@ -246,7 +304,59 @@ mod tests {
     fn o_volume_sobrevive_a_ida_e_volta() {
         let status = SharedStatus::new();
         status.set_volume(0.375);
-        assert!((status.volume() - 0.375).abs() < 1e-6);
+        assert_eq!(status.volume(), Some(0.375));
+    }
+
+    #[test]
+    fn sem_device_ou_sem_controle_nao_ha_volume() {
+        let status = SharedStatus::new();
+        assert_eq!(status.volume(), None);
+        // É o que `apply_volume` publica para device sem controle de volume.
+        status.set_volume(-1.0);
+        assert_eq!(status.volume(), None);
+    }
+
+    #[test]
+    fn o_mudo_sobrevive_a_ida_e_volta() {
+        let status = SharedStatus::new();
+        assert!(!status.muted());
+        status.set_muted(true);
+        assert!(status.muted());
+    }
+
+    #[test]
+    fn publicar_um_problema_avanca_a_sequencia_e_guarda_o_texto() {
+        let status = SharedStatus::new();
+        assert_eq!(status.problem_seq(), 0);
+        assert_eq!(status.problem(), None);
+
+        status.publish_problem("o device sumiu".to_string());
+        assert_eq!(status.problem_seq(), 1);
+        assert_eq!(status.problem().as_deref(), Some("o device sumiu"));
+
+        // Limpar não é um problema novo: a interface não pode reexibir nada por causa disto.
+        status.clear_problem();
+        assert_eq!(status.problem_seq(), 1);
+        assert_eq!(status.problem(), None);
+    }
+
+    #[test]
+    fn a_suspeita_de_device_sobrevive_a_ida_e_volta() {
+        let status = SharedStatus::new();
+        assert!(!status.device_suspect());
+        status.set_device_suspect(true);
+        assert!(status.device_suspect());
+        status.set_device_suspect(false);
+        assert!(!status.device_suspect());
+    }
+
+    #[test]
+    fn os_frames_brutos_nao_param_no_total_da_faixa() {
+        // O watchdog precisa ver o IOProc andando mesmo depois de o decorrido parar no total.
+        let status = SharedStatus::new();
+        status.set_track(1_000, 1_000.0);
+        status.add_frames(5_000);
+        assert_eq!(status.frames_rendered(), 5_000);
     }
 
     #[test]

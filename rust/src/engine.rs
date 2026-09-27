@@ -7,16 +7,21 @@ use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 use std::thread::JoinHandle;
 use std::time::Instant;
 
-use coreaudio_sys::AudioStreamBasicDescription;
+use coreaudio_sys::{AudioObjectID, AudioStreamBasicDescription};
 
 use crate::tuning::curve::Curve;
 use crate::tuning::design::{DEFAULT_TAPS, design};
 use crate::tuning::process::Processor;
 use crate::tuning::quantize::{OutputFormat, Quantizer};
 
-use crate::device::{HoggedDevice, OutputDevice, query_default_output_device};
+use crate::device::{
+    HoggedDevice, OutputDevice, PendingVolume, live_signals, process_name,
+    query_default_output_device,
+};
+use crate::device_watch::WatchState;
 use crate::format::{self, Decision, SampleRateRange};
 use crate::playback::Playback;
+use crate::recovery::{LiveSignals, Problem, describe, request_applies, verdict};
 use crate::source::AudioSource;
 use crate::status::SharedStatus;
 use crate::timings::{Phase, PhaseTimings, TimingLog};
@@ -25,6 +30,17 @@ use crate::volume::{VolumeRequest, VolumeUnit, apply_ceiling};
 
 /// O mesmo padrão da CLI: sem `--volume` explícito, o device é baixado para no máximo isto.
 pub const DEFAULT_CEILING: f64 = 0.5;
+
+/// Tocando, o IOProc soma frames a cada chamada, mesmo em underrun. Parados por mais que
+/// isto, ele não está sendo chamado: é a perda que chega sem notificação.
+const STALL_LIMIT: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// A mesma tolerância da confirmação de escrita em `device.rs`: abaixo disto, é o volume que o
+/// próprio engine aplicou.
+const VOLUME_TOLERANCE: f32 = 0.005;
+
+/// Sem listeners, o intervalo entre conferências ao vivo do device no poll.
+const LIVE_CHECK_WITHOUT_WATCH: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// O que a interface precisa saber sobre a faixa recém-carregada.
 #[derive(Debug)]
@@ -84,26 +100,53 @@ impl PlayFailure {
 pub(crate) enum LoadFailure {
     Track(String),
     Device(String),
+    /// O device retido se perdeu. A faixa pedida ficou carregada no lugar da anterior, sem
+    /// device; quem chama aponta a fila para ela.
+    DeviceLost(String),
 }
 
 impl LoadFailure {
     fn into_message(self) -> String {
         match self {
-            LoadFailure::Track(message) | LoadFailure::Device(message) => message,
+            LoadFailure::Track(message)
+            | LoadFailure::Device(message)
+            | LoadFailure::DeviceLost(message) => message,
         }
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct QueueEntry {
+    pub id: u64,
     pub path: String,
     pub failure: Option<String>,
+}
+
+/// De onde vêm os sinais ao vivo do device. Existe para os testes simularem a perda sem
+/// hardware; em produção é sempre o HAL.
+pub(crate) trait DeviceProbe: Send + Sync {
+    fn signals(&self, device: AudioObjectID, stream: AudioObjectID) -> LiveSignals;
+    /// Volume e mudo do device agora; `None` onde não há o controle ou a leitura falhou.
+    fn volume(&self, device: AudioObjectID) -> (Option<f32>, Option<bool>);
+}
+
+struct HalProbe;
+
+impl DeviceProbe for HalProbe {
+    fn signals(&self, device: AudioObjectID, stream: AudioObjectID) -> LiveSignals {
+        live_signals(device, stream)
+    }
+
+    fn volume(&self, device: AudioObjectID) -> (Option<f32>, Option<bool>) {
+        crate::device::live_volume(device)
+    }
 }
 
 pub struct Engine {
     status: Arc<SharedStatus>,
     inner: Mutex<EngineInner>,
     timings: TimingLog,
+    probe: Box<dyn DeviceProbe>,
 }
 
 struct EngineInner {
@@ -118,16 +161,34 @@ struct EngineInner {
     producer: Option<JoinHandle<()>>,
     stop_producer: Arc<AtomicBool>,
     volume: Option<VolumeRequest>,
+    /// O device em que o volume foi pedido. `None` vale para qualquer um (o `--volume`).
+    volume_uid: Option<String>,
     tuning: Option<Curve>,
     ceiling: f64,
     volume_outcome: Option<VolumeOutcome>,
     queue: Vec<QueueEntry>,
+    /// O id da próxima entrada. Só cresce: um id nunca volta, nem depois de limpar a fila.
+    next_queue_id: u64,
     current_index: Option<usize>,
+    /// Os listeners do device retido e a geração do device já examinada pelo poll.
+    watch: Option<Arc<WatchState>>,
+    watch_seen: u64,
+    /// As gerações de volume e mudo já examinadas pelo poll.
+    volume_seen: u64,
+    /// Os frames do IOProc na última vez que andaram, e quando.
+    watchdog: Option<(u64, Instant)>,
+    /// Sem listeners, o poll confere o device ao vivo de tempos em tempos.
+    last_live_check: Option<Instant>,
 }
 
 impl Engine {
     pub fn new() -> Self {
+        Self::with_probe(Box::new(HalProbe))
+    }
+
+    pub(crate) fn with_probe(probe: Box<dyn DeviceProbe>) -> Self {
         Self {
+            probe,
             status: Arc::new(SharedStatus::new()),
             inner: Mutex::new(EngineInner {
                 state: PlayerState::Idle,
@@ -141,11 +202,18 @@ impl Engine {
                 producer: None,
                 stop_producer: Arc::new(AtomicBool::new(false)),
                 volume: None,
+                volume_uid: None,
                 tuning: None,
                 ceiling: DEFAULT_CEILING,
                 volume_outcome: None,
                 queue: Vec::new(),
+                next_queue_id: 1,
                 current_index: None,
+                watch: None,
+                watch_seen: 0,
+                volume_seen: 0,
+                watchdog: None,
+                last_live_check: None,
             }),
             timings: TimingLog::default(),
         }
@@ -208,6 +276,7 @@ impl Engine {
     pub fn set_requested_volume(&self, volume: Option<VolumeRequest>, ceiling: f64) {
         let mut inner = self.lock();
         inner.volume = volume;
+        inner.volume_uid = None;
         inner.ceiling = ceiling;
     }
 
@@ -258,9 +327,22 @@ impl Engine {
         // (e negociar contra as capacidades erradas). As `caps` guardadas continuam válidas —
         // formatos físicos e taxas suportadas não mudam com o tempo — e o rate, desde a
         // Correção 1, já vem de uma releitura ao vivo dentro de `acquire()`, não daqui.
+        //
+        // Reaproveitar exige confirmar ao vivo que o device continua vivo e nosso: o auto-avanço
+        // e a navegação passam por aqui, e nenhum deles pode seguir tocando em outro device por
+        // conta própria.
         let held_device = {
-            let inner = self.lock();
+            let mut inner = self.lock();
             if inner.hogged.is_some() {
+                if let Some(problem) = self.live_problem(&inner) {
+                    let message = self.handle_device_loss(&mut inner, problem);
+                    // A faixa pedida fica carregada, sem device: a remoção já moveu a fila para
+                    // ela, e o Play seguinte tem de tocar o que a tela mostra.
+                    inner.path = Some(path.to_string());
+                    inner.source = Some(source);
+                    self.status.set_track(total_frames, file_format.sample_rate);
+                    return Err(LoadFailure::DeviceLost(message));
+                }
                 inner.device.clone()
             } else {
                 None
@@ -274,10 +356,7 @@ impl Engine {
             Some(device) => device,
             None => query_default_output_device().map_err(LoadFailure::Device)?,
         };
-        let decision = format::negotiate(&file_format, &device.caps);
-        if !decision.play {
-            return Err(LoadFailure::Track(decision.reason));
-        }
+        let decision = negotiate_on(&device, &file_format).map_err(LoadFailure::Track)?;
 
         let mut inner = self.lock();
         // `teardown` só limpa os campos da faixa carregada; soltar o device é
@@ -323,10 +402,15 @@ impl Engine {
         }
         let count = paths.len();
         let mut inner = self.lock();
-        inner.queue.extend(paths.into_iter().map(|path| QueueEntry {
-            path,
-            failure: None,
-        }));
+        for path in paths {
+            let id = inner.next_queue_id;
+            inner.next_queue_id += 1;
+            inner.queue.push(QueueEntry {
+                id,
+                path,
+                failure: None,
+            });
+        }
         self.status
             .set_queue_state(inner.current_index, inner.queue.len());
         self.status.bump_queue_version();
@@ -347,6 +431,10 @@ impl Engine {
     pub(crate) fn queue_position(&self) -> (Option<usize>, usize) {
         let inner = self.lock();
         (inner.current_index, inner.queue.len())
+    }
+
+    pub(crate) fn queue_index_of(&self, id: u64) -> Option<usize> {
+        self.lock().queue.iter().position(|entry| entry.id == id)
     }
 
     pub(crate) fn queue_path(&self, index: usize) -> Option<String> {
@@ -415,6 +503,193 @@ impl Engine {
         self.poll_finished();
     }
 
+    /// Põe o engine num estado que retém um device, sem hardware: o `HoggedDevice` nunca passou
+    /// por `acquire`, então soltá-lo não chama o HAL.
+    #[cfg(test)]
+    pub(crate) fn hold_for_test(
+        &self,
+        state: PlayerState,
+        baseline: crate::recovery::Baseline,
+        watch: Arc<WatchState>,
+        path: &str,
+    ) {
+        let mut inner = self.lock();
+        inner.path = Some(path.to_string());
+        inner.hogged = Some(HoggedDevice::with_baseline_for_test(baseline));
+        inner.watch_seen = watch.device_generation();
+        inner.volume_seen = volume_generation(&watch);
+        inner.watch = Some(watch);
+        inner.state = state;
+        self.status.set_state(state);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn holds_device_for_test(&self) -> bool {
+        self.lock().hogged.is_some()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn loaded_path_for_test(&self) -> Option<String> {
+        self.lock().path.clone()
+    }
+
+    /// O volume que a próxima aquisição vai aplicar, como escalar.
+    #[cfg(test)]
+    pub(crate) fn requested_volume_for_test(&self) -> Option<f64> {
+        self.lock().volume.as_ref().map(|request| request.value)
+    }
+
+    /// Faz o watchdog acreditar que os frames estão parados há `ago`.
+    #[cfg(test)]
+    pub(crate) fn backdate_watchdog_for_test(&self, ago: std::time::Duration) {
+        let mut inner = self.lock();
+        let frames = self.status.frames_rendered();
+        inner.watchdog = Instant::now().checked_sub(ago).map(|since| (frames, since));
+    }
+
+    /// Confirma a perda do device ao vivo e, confirmada, solta o que restou dele e volta a
+    /// Loaded com a faixa. Devolve a mensagem do problema, ou `None` se o device está bem.
+    pub fn recover(&self) -> Option<String> {
+        let mut inner = self.lock();
+        self.status.set_device_suspect(false);
+        let problem = self.live_problem(&inner)?;
+        Some(self.handle_device_loss(&mut inner, problem))
+    }
+
+    /// O veredito ao vivo do device retido: `None` se nada está retido ou se ele continua
+    /// como a aquisição o deixou.
+    fn live_problem(&self, inner: &EngineInner) -> Option<Problem> {
+        let hogged = inner.hogged.as_ref()?;
+        let baseline = hogged.baseline()?;
+        let signals = self.probe.signals(hogged.device_id(), hogged.stream_id());
+        verdict(&signals, &baseline)
+    }
+
+    /// Solta o que restou do device sem escrever nele (a precondição mora em `restore`),
+    /// esquece a negociação e volta a Loaded com a faixa. A negociação sai junto porque só um
+    /// Play explícito pode escolher outro device.
+    fn release_lost_device(&self, inner: &mut EngineInner) {
+        // Sem adotar o volume: o que o device tem agora pode ser o de quem tomou o hog.
+        let _ = self.release_device(inner, false);
+        inner.device = None;
+        inner.decision = None;
+        inner.client = None;
+        self.enter_device_lost_state(inner);
+    }
+
+    fn enter_device_lost_state(&self, inner: &mut EngineInner) {
+        let target = next_state(inner.state, Command::DeviceLost).unwrap_or(inner.state);
+        inner.state = target;
+        self.status.set_state(target);
+        self.status.reset_progress();
+    }
+
+    fn handle_device_loss(&self, inner: &mut EngineInner, problem: Problem) -> String {
+        self.release_lost_device(inner);
+        let app = match problem {
+            Problem::HogLost { owner } if owner > 0 => process_name(owner),
+            _ => None,
+        };
+        let message = describe(problem, app.as_deref());
+        self.status.publish_problem(message.clone());
+        message
+    }
+
+    /// A parte do poll que olha o device. Só lê o HAL quando um listener avisou, quando os
+    /// frames pararam tocando, ou — sem listeners — de tempos em tempos. Nunca solta nada:
+    /// quem age é o `recover`, fora da main thread.
+    fn watch_device(&self, inner: &mut EngineInner) {
+        let holding = matches!(
+            inner.state,
+            PlayerState::Playing | PlayerState::Paused | PlayerState::Finished
+        );
+        if !holding || inner.hogged.is_none() || self.status.device_suspect() {
+            return;
+        }
+        let notified = match inner.watch.as_ref() {
+            Some(watch) => {
+                let generation = watch.device_generation();
+                let changed = generation != inner.watch_seen;
+                inner.watch_seen = generation;
+                changed
+            }
+            None => inner
+                .last_live_check
+                .is_none_or(|checked| checked.elapsed() >= LIVE_CHECK_WITHOUT_WATCH),
+        };
+        let stalled = inner.state == PlayerState::Playing && self.frames_stalled(inner);
+        if !notified && !stalled {
+            return;
+        }
+        inner.last_live_check = Some(Instant::now());
+        if self.live_problem(inner).is_some() {
+            self.status.set_device_suspect(true);
+        } else if stalled {
+            // Rearma: se continuar parado, confere de novo depois de outro `STALL_LIMIT`.
+            inner.watchdog = Some((self.status.frames_rendered(), Instant::now()));
+        }
+    }
+
+    /// A parte do poll que acompanha volume e mudo. Só lê o HAL quando um listener avisou.
+    fn watch_volume(&self, inner: &mut EngineInner) {
+        let holding = matches!(
+            inner.state,
+            PlayerState::Playing | PlayerState::Paused | PlayerState::Finished
+        );
+        if !holding {
+            return;
+        }
+        let (Some(hogged), Some(watch)) = (inner.hogged.as_ref(), inner.watch.as_ref()) else {
+            return;
+        };
+        let generation = volume_generation(watch);
+        if generation == inner.volume_seen {
+            return;
+        }
+        inner.volume_seen = generation;
+        let device = hogged.device_id();
+        self.adopt_live_volume(inner, device);
+    }
+
+    /// Volume e mudo lidos agora. Um volume diferente do que o engine aplicou por último foi
+    /// mudado por fora, e vira o pedido da próxima faixa: reaplicar o antigo poderia subir o
+    /// volume de quem acabou de baixá-lo.
+    fn adopt_live_volume(&self, inner: &mut EngineInner, device: AudioObjectID) {
+        let (scalar, muted) = self.probe.volume(device);
+        if let Some(muted) = muted {
+            self.status.set_muted(muted);
+        }
+        let Some(scalar) = scalar else {
+            return;
+        };
+        if self
+            .status
+            .volume()
+            .is_some_and(|known| (known - scalar).abs() < VOLUME_TOLERANCE)
+        {
+            return;
+        }
+        inner.volume = Some(VolumeRequest {
+            valid: true,
+            unit: VolumeUnit::Percent,
+            value: scalar as f64,
+            reason: String::new(),
+        });
+        inner.volume_uid = inner.device.as_ref().map(|device| device.uid.clone());
+        self.status.set_volume(scalar);
+    }
+
+    fn frames_stalled(&self, inner: &mut EngineInner) -> bool {
+        let frames = self.status.frames_rendered();
+        match inner.watchdog {
+            Some((seen, since)) if seen == frames => since.elapsed() > STALL_LIMIT,
+            _ => {
+                inner.watchdog = Some((frames, Instant::now()));
+                false
+            }
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn current_device_id_for_test(&self) -> Option<u32> {
         self.lock().device.as_ref().map(|device| device.id)
@@ -434,15 +709,32 @@ impl Engine {
 
         match inner.state {
             PlayerState::Playing => return Ok(()), // idempotente: duplo clique no botão
-            PlayerState::Paused => {
-                // O device já deveria estar retido neste estado; sem ele, o problema não é o
-                // hardware ter recusado algo, é o player estar num estado que ele mesmo não
-                // sabe mais resolver — por isso `State`, não `Device`.
-                let hogged = inner.hogged.as_mut().ok_or_else(|| {
-                    PlayFailure::State("pausado sem device; recarregue a faixa".to_string())
-                })?;
-                hogged.resume().map_err(PlayFailure::Device)?;
-            }
+            PlayerState::Paused => match self.live_problem(&inner) {
+                None => {
+                    // O device já deveria estar retido neste estado; sem ele, o problema não é o
+                    // hardware ter recusado algo, é o player estar num estado que ele mesmo não
+                    // sabe mais resolver — por isso `State`, não `Device`.
+                    let hogged = inner.hogged.as_mut().ok_or_else(|| {
+                        PlayFailure::State("pausado sem device; recarregue a faixa".to_string())
+                    })?;
+                    hogged.resume().map_err(PlayFailure::Device)?;
+                }
+                // Mudou enquanto pausado: o Mac dormiu, outro app mexeu no formato. Recomeça
+                // do zero no mesmo device. Se a partida falhar, o device já foi solto, e ficar
+                // pausado sem ele seria um beco sem saída.
+                Some(Problem::FormatChanged) => {
+                    if let Err(failure) = self.start_common(&mut inner, true) {
+                        self.enter_device_lost_state(&mut inner);
+                        return Err(failure);
+                    }
+                }
+                // O device sumiu ou deixou de ser nosso. Este é um Play explícito, o único que
+                // pode negociar com o device padrão atual.
+                Some(Problem::Disconnected | Problem::HogLost { .. }) => {
+                    self.release_lost_device(&mut inner);
+                    self.start_common(&mut inner, true)?;
+                }
+            },
             PlayerState::Loaded | PlayerState::Finished => self.start_common(&mut inner, true)?,
             // O `next_state` acima já teria retornado erro para Play a partir de Idle ou
             // Failed. Um wildcard aqui esconderia uma variante nova de `PlayerState` caindo
@@ -483,7 +775,11 @@ impl Engine {
             value: scalar as f64,
             reason: String::new(),
         });
-        match inner.hogged.as_mut() {
+        inner.volume_uid = inner.device.as_ref().map(|device| device.uid.clone());
+        // Sob suspeita, o device pode já ser de outro app: o pedido fica guardado para a
+        // próxima aquisição, sem escrever nele.
+        let suspect = self.status.device_suspect();
+        match inner.hogged.as_mut().filter(|_| !suspect) {
             Some(hogged) => {
                 // Interativa: o device já está configurado e estável aqui, então esta escrita
                 // confere na hora em vez de esperar 30 ms como a da aquisição. O slider chama
@@ -510,13 +806,11 @@ impl Engine {
             // o próximo poll, 100 ms depois, pega o fim da faixa se for o caso.
             return;
         };
-        if inner.state != PlayerState::Playing {
-            return;
-        }
-        let terminou = inner
-            .playback
-            .as_ref()
-            .is_some_and(|p| p.finished.load(std::sync::atomic::Ordering::Acquire));
+        let terminou = inner.state == PlayerState::Playing
+            && inner
+                .playback
+                .as_ref()
+                .is_some_and(|p| p.finished.load(std::sync::atomic::Ordering::Acquire));
         if terminou {
             if let Some(hogged) = inner.hogged.as_mut() {
                 hogged.stop();
@@ -524,6 +818,8 @@ impl Engine {
             inner.state = PlayerState::Finished;
             self.status.set_state(PlayerState::Finished);
         }
+        self.watch_device(&mut inner);
+        self.watch_volume(&mut inner);
     }
 
     pub fn shutdown(&self) -> Result<(), String> {
@@ -562,6 +858,33 @@ impl Engine {
         self.timings.record(Phase::Reopen, reopening);
         let file_format = source.format();
 
+        // Depois de perder o device a negociação foi esquecida. Só um Play explícito chega aqui
+        // assim, e é ele que escolhe o device padrão atual; a recusa dele é do device, não da
+        // faixa, que não pode ser marcada como falha por isso.
+        if inner.device.is_none() || inner.decision.is_none() {
+            let device = query_default_output_device().map_err(PlayFailure::Device)?;
+            let decision = negotiate_on(&device, &file_format).map_err(PlayFailure::Device)?;
+            inner.device = Some(device);
+            inner.decision = Some(decision);
+        }
+
+        // Um volume pedido para outro device não vale neste: vira o teto.
+        let volume_elsewhere = match (inner.volume_uid.as_deref(), inner.device.as_ref()) {
+            (Some(uid), Some(device)) if !request_applies(Some(uid), &device.uid) => {
+                Some(device.name.clone())
+            }
+            _ => None,
+        };
+        let volume_warning = volume_elsewhere.map(|name| {
+            inner.volume = None;
+            inner.volume_uid = None;
+            format!(
+                "a saída agora é {name}: o volume pedido era para outro device e voltou ao \
+                 teto de {:.0}%",
+                inner.ceiling * 100.0
+            )
+        });
+
         // Os dados que o resto da função precisa são copiados aqui para que os empréstimos
         // de `inner` terminem antes das atribuições no fim: sem isso o verificador de
         // empréstimos recusa a função.
@@ -574,9 +897,18 @@ impl Engine {
             .as_ref()
             .ok_or_else(|| PlayFailure::State("formato não negociado".to_string()))?;
 
-        let mut hogged = HoggedDevice::new();
-        let physical = device.physical_formats[decision.physical_format_index as usize];
         let acquiring = Instant::now();
+        // Registrados antes do acquire, para as esperas dele acordarem na notificação e nada
+        // que mude depois passar despercebido. Falhar aqui não impede de tocar: sem listeners,
+        // as esperas conferem no intervalo e o poll confere o device de tempos em tempos.
+        let watch = crate::device_watch::watch(device.id, device.stream_id).ok();
+        // Tiradas antes do acquire: uma mudança por fora durante o prefill não pode se perder.
+        // As notificações do nosso próprio acquire custam só uma conferência no poll.
+        let seen_generations = watch
+            .as_ref()
+            .map(|watch| (watch.device_generation(), volume_generation(watch)));
+        let mut hogged = HoggedDevice::with_watch(watch.clone());
+        let physical = device.physical_formats[decision.physical_format_index as usize];
         hogged
             .acquire(device, decision.sample_rate, &physical)
             .map_err(PlayFailure::Device)?;
@@ -589,18 +921,19 @@ impl Engine {
         // com a restauração tendo falhado. `finish_with_error` fecha essa fresta: finaliza
         // `hogged` explicitamente e concatena os dois erros, para nenhum se perder.
 
-        // Com o device já nosso e antes de qualquer amostra sair: é o único ponto em que dá
-        // para garantir que o fone não receba o volume anterior. A publicação no
-        // `SharedStatus` fica para o fim da função — ver o comentário perto de
+        // Com o device já nosso, logo depois do formato: a escrita sai aqui, na ordem de
+        // sempre. A conferência, que precisa de 30 ms para poder discordar, fica para antes do
+        // start — nenhuma amostra sai antes dela —, e a espera corre junto com o prefill. A
+        // publicação no `SharedStatus` fica para o fim da função — ver o comentário perto de
         // `self.status.set_volume` mais abaixo.
         let applying_volume = Instant::now();
-        let outcome = match apply_volume(&mut hogged, device, inner.volume.as_ref(), inner.ceiling)
-        {
-            Ok(outcome) => outcome,
-            Err(error) => {
-                return Err(PlayFailure::Device(finish_with_error(hogged, error)));
-            }
-        };
+        let volume_start =
+            match begin_apply_volume(&mut hogged, device, inner.volume.as_ref(), inner.ceiling) {
+                Ok(start) => start,
+                Err(error) => {
+                    return Err(PlayFailure::Device(finish_with_error(hogged, error)));
+                }
+            };
         self.timings.record(Phase::Volume, applying_volume);
 
         let stream = hogged.stream_format();
@@ -716,6 +1049,17 @@ impl Engine {
         }
         self.timings.record(Phase::Prefill, prefilling);
 
+        let confirming_volume = Instant::now();
+        let outcome = match finish_apply_volume(&hogged, volume_start) {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                let _ = producer.join();
+                return Err(PlayFailure::Device(finish_with_error(hogged, error)));
+            }
+        };
+        self.timings.record(Phase::Volume, confirming_volume);
+
         // O modo dump usa exatamente este mesmo caminho, sem só esta última etapa: assim ele
         // percorre decodificador, ring buffer e alinhamento de frame, que é onde estiveram os
         // bugs mais caros. Um atalho que apenas decodificasse não provaria nada disso.
@@ -724,8 +1068,9 @@ impl Engine {
             // cada callback de tempo real do Core Audio. O invariante que sustenta isso: ao
             // menos um `Arc<Playback>` fica vivo enquanto o callback puder disparar.
             // `stop_and_release` garante a ordem inversa na saída — chama `hogged.stop()`
-            // (nenhum callback novo depois disso) e só então junta a produtora e zera
-            // `inner.playback`, então o ponteiro nunca é lido depois do `Arc` cair.
+            // (nenhum callback novo depois disso), junta a produtora, destrói o IOProc e só
+            // então zera `inner.playback`, então o ponteiro nunca é lido depois do `Arc` cair.
+            // Se o stop e o destroy falharem, o `Playback` é vazado em vez de liberado.
             let context = Arc::as_ptr(&playback) as *mut std::ffi::c_void;
             let starting = Instant::now();
             let started = unsafe { hogged.start(Some(crate::playback::io_proc), context) };
@@ -744,12 +1089,23 @@ impl Engine {
         // `Drop` reverteria o volume no hardware) — publicar antes deixaria o status
         // mostrando um volume que o device já não tem mais caso alguma checagem acima falhe.
         self.status.set_volume(outcome.scalar);
+        let (_, muted) = self.probe.volume(hogged.device_id());
+        self.status.set_muted(muted.unwrap_or(false));
         inner.volume_outcome = Some(outcome);
         inner.client = Some(client);
         inner.hogged = Some(hogged);
         inner.playback = Some(playback);
         inner.producer = Some(producer);
         inner.stop_producer = stop;
+        (inner.watch_seen, inner.volume_seen) = seen_generations.unwrap_or_default();
+        inner.watch = watch;
+        inner.watchdog = None;
+        inner.last_live_check = None;
+        self.status.set_device_suspect(false);
+        self.status.clear_problem();
+        if let Some(warning) = volume_warning {
+            self.status.publish_problem(warning);
+        }
         Ok(())
     }
 
@@ -773,6 +1129,11 @@ impl Engine {
     }
 
     fn stop_and_release(&self, inner: &mut EngineInner) -> Result<(), String> {
+        self.release_device(inner, true)
+    }
+
+    /// `adopt_volume` falso quando o device se perdeu: o volume dele já não é o nosso.
+    fn release_device(&self, inner: &mut EngineInner, adopt_volume: bool) -> Result<(), String> {
         if let Some(hogged) = inner.hogged.as_mut() {
             hogged.stop();
         }
@@ -782,12 +1143,35 @@ impl Engine {
         if let Some(producer) = inner.producer.take() {
             let _ = producer.join();
         }
-        inner.playback = None;
+        // A última chance de ver uma mudança de volume cuja notificação não chegou: a
+        // restauração devolve o volume de antes do hog, e a mudança se perderia.
+        let acquired = inner
+            .hogged
+            .as_ref()
+            .filter(|hogged| adopt_volume && hogged.baseline().is_some())
+            .map(HoggedDevice::device_id);
+        if let Some(device) = acquired {
+            self.adopt_live_volume(inner, device);
+        }
+        // O IOProc é destruído em `finish`, antes de o `Arc<Playback>` cair: o callback lê o
+        // ponteiro cru dele. Se nem o stop nem o destroy funcionaram, o callback pode
+        // continuar vivo, e o `Playback` fica vazado de propósito.
         let restore = match inner.hogged.as_mut() {
             Some(hogged) => hogged.finish(),
             None => Ok(()),
         };
+        if inner
+            .hogged
+            .as_ref()
+            .is_some_and(HoggedDevice::io_proc_may_still_run)
+            && let Some(playback) = inner.playback.as_ref()
+        {
+            std::mem::forget(Arc::clone(playback));
+        }
+        inner.playback = None;
         inner.hogged = None;
+        inner.watch = None;
+        inner.watchdog = None;
         restore
     }
 
@@ -816,6 +1200,25 @@ impl Drop for Engine {
     fn drop(&mut self) {
         let mut inner = self.lock();
         let _ = self.stop_and_release(&mut inner);
+    }
+}
+
+fn volume_generation(watch: &WatchState) -> u64 {
+    use crate::device_watch::Watched;
+    watch.generation(Watched::Volume) + watch.generation(Watched::Mute)
+}
+
+/// A negociação da carga e a do Play depois de perder o device são a mesma: a diferença é só
+/// como cada uma classifica a recusa. `Err` traz o motivo.
+fn negotiate_on(
+    device: &OutputDevice,
+    file_format: &format::FileFormat,
+) -> Result<Decision, String> {
+    let decision = format::negotiate(file_format, &device.caps);
+    if decision.play {
+        Ok(decision)
+    } else {
+        Err(decision.reason)
     }
 }
 
@@ -1063,15 +1466,30 @@ fn read_applied(hogged: &HoggedDevice, fallback_scalar: f32) -> (f32, f64) {
     }
 }
 
+/// A escrita de volume da aquisição: já decidida, ou escrita e à espera da conferência.
+pub(crate) enum VolumeStart {
+    Decided(VolumeOutcome),
+    Pending {
+        pending: PendingVolume,
+        /// Um pedido explícito é garantia: se a conferência falhar, não toca.
+        explicit: bool,
+        previous_scalar: f32,
+        /// O volume antes da escrita, para o aviso quando o teto não pega.
+        current: f32,
+    },
+}
+
 /// Um pedido explícito é uma garantia: se não der para cumprir, é melhor não tocar do que
 /// tocar mais alto do que se pediu. Já o teto é uma rede de proteção — não havendo controle
 /// de volume, ou falhando a escrita, avisa e segue, que é o comportamento de sempre.
-pub(crate) fn apply_volume(
+///
+/// Esta é a primeira metade: decide e escreve. A conferência é `finish_apply_volume`.
+pub(crate) fn begin_apply_volume(
     hogged: &mut HoggedDevice,
     device: &OutputDevice,
     request: Option<&VolumeRequest>,
     ceiling: f64,
-) -> Result<VolumeOutcome, String> {
+) -> Result<VolumeStart, String> {
     if let Some(request) = request {
         let scalar = match request.unit {
             VolumeUnit::Percent => request.value as f32,
@@ -1079,26 +1497,23 @@ pub(crate) fn apply_volume(
                 .decibels_to_scalar(request.value)
                 .ok_or("este device não converte decibéis; use porcentagem")?,
         };
-        let before = device.volume;
-        hogged.set_volume(scalar)?;
-        let (applied_scalar, applied_decibels) = read_applied(hogged, scalar);
-        return Ok(VolumeOutcome {
-            scalar: applied_scalar,
-            decibels: applied_decibels,
-            previous_scalar: before,
-            lowered_by_ceiling: false,
-            warning: None,
+        let pending = hogged.begin_volume(scalar)?;
+        return Ok(VolumeStart::Pending {
+            pending,
+            explicit: true,
+            previous_scalar: device.volume,
+            current: device.volume,
         });
     }
 
     if device.volume < 0.0 {
-        return Ok(VolumeOutcome {
+        return Ok(VolumeStart::Decided(VolumeOutcome {
             scalar: -1.0,
             decibels: f64::NAN,
             previous_scalar: device.volume,
             lowered_by_ceiling: false,
             warning: None,
-        });
+        }));
     }
 
     // O teto decide sobre o volume lido agora, não sobre o que havia antes de tomar o
@@ -1113,44 +1528,186 @@ pub(crate) fn apply_volume(
     let decision = apply_ceiling(current as f64, ceiling);
     if !decision.apply {
         let (applied_scalar, applied_decibels) = read_applied(hogged, current);
-        return Ok(VolumeOutcome {
+        return Ok(VolumeStart::Decided(VolumeOutcome {
             scalar: applied_scalar,
             decibels: applied_decibels,
             previous_scalar: current,
             lowered_by_ceiling: false,
             warning: None,
-        });
+        }));
     }
 
-    if let Err(error) = hogged.set_volume(decision.scalar as f32) {
-        // O teto é rede de proteção, não garantia: não conseguir baixar não pode abortar a
-        // reprodução, ao contrário de um pedido explícito falhar. O texto do erro vai no
-        // aviso para não ficar indistinguível de "já estava abaixo do teto".
-        let (applied_scalar, applied_decibels) = read_applied(hogged, current);
+    match hogged.begin_volume(decision.scalar as f32) {
+        Ok(pending) => Ok(VolumeStart::Pending {
+            pending,
+            explicit: false,
+            previous_scalar: current,
+            current,
+        }),
+        Err(error) => Ok(VolumeStart::Decided(ceiling_not_applied(
+            hogged, current, &error,
+        ))),
+    }
+}
+
+/// A segunda metade: confere a escrita de `begin_apply_volume` e lê o que o device assumiu.
+pub(crate) fn finish_apply_volume(
+    hogged: &HoggedDevice,
+    start: VolumeStart,
+) -> Result<VolumeOutcome, String> {
+    let (pending, explicit, previous_scalar, current) = match start {
+        VolumeStart::Decided(outcome) => return Ok(outcome),
+        VolumeStart::Pending {
+            pending,
+            explicit,
+            previous_scalar,
+            current,
+        } => (pending, explicit, previous_scalar, current),
+    };
+    if hogged.confirm_volume(&pending) {
+        let (applied_scalar, applied_decibels) = read_applied(hogged, pending.target());
         return Ok(VolumeOutcome {
             scalar: applied_scalar,
             decibels: applied_decibels,
-            previous_scalar: current,
-            lowered_by_ceiling: false,
-            warning: Some(format!(
-                "volume em {:.0}% e não consegui baixá-lo ({error})",
-                current * 100.0
-            )),
+            previous_scalar,
+            lowered_by_ceiling: !explicit,
+            warning: None,
         });
     }
+    let error = "o device não assumiu o volume pedido; não vou tocar sem essa garantia";
+    if explicit {
+        return Err(error.to_string());
+    }
+    Ok(ceiling_not_applied(hogged, current, error))
+}
 
-    let (applied_scalar, applied_decibels) = read_applied(hogged, decision.scalar as f32);
-    Ok(VolumeOutcome {
+/// O teto é rede de proteção, não garantia: não conseguir baixar não pode abortar a
+/// reprodução, ao contrário de um pedido explícito falhar. O texto do erro vai no aviso para
+/// não ficar indistinguível de "já estava abaixo do teto".
+fn ceiling_not_applied(hogged: &HoggedDevice, current: f32, error: &str) -> VolumeOutcome {
+    let (applied_scalar, applied_decibels) = read_applied(hogged, current);
+    VolumeOutcome {
         scalar: applied_scalar,
         decibels: applied_decibels,
         previous_scalar: current,
-        lowered_by_ceiling: true,
-        warning: None,
-    })
+        lowered_by_ceiling: false,
+        warning: Some(format!(
+            "volume em {:.0}% e não consegui baixá-lo ({error})",
+            current * 100.0
+        )),
+    }
+}
+
+/// Apoio aos testes que simulam a perda do device sem hardware.
+#[cfg(test)]
+pub(crate) mod testing {
+    use super::*;
+
+    /// Sinais ao vivo que o teste controla, contando as leituras.
+    #[derive(Clone)]
+    pub(crate) struct SondaFalsa {
+        sinais: Arc<Mutex<LiveSignals>>,
+        leituras: Arc<std::sync::atomic::AtomicUsize>,
+        volume: Arc<Mutex<(Option<f32>, Option<bool>)>>,
+        leituras_de_volume: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl SondaFalsa {
+        pub(crate) fn mudar(&self, sinais: LiveSignals) {
+            *self.sinais.lock().expect("sonda") = sinais;
+        }
+
+        pub(crate) fn leituras(&self) -> usize {
+            self.leituras.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        pub(crate) fn mudar_volume(&self, escalar: Option<f32>, mudo: Option<bool>) {
+            *self.volume.lock().expect("sonda") = (escalar, mudo);
+        }
+
+        pub(crate) fn leituras_de_volume(&self) -> usize {
+            self.leituras_de_volume
+                .load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl DeviceProbe for SondaFalsa {
+        fn signals(&self, _device: AudioObjectID, _stream: AudioObjectID) -> LiveSignals {
+            self.leituras
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            *self.sinais.lock().expect("sonda")
+        }
+
+        fn volume(&self, _device: AudioObjectID) -> (Option<f32>, Option<bool>) {
+            self.leituras_de_volume
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            *self.volume.lock().expect("sonda")
+        }
+    }
+
+    pub(crate) const PID_DE_TESTE: i32 = 4242;
+
+    pub(crate) fn formato_de_teste() -> crate::recovery::PhysicalFormat {
+        crate::recovery::PhysicalFormat {
+            sample_rate: 44_100.0,
+            format_id: coreaudio_sys::kAudioFormatLinearPCM,
+            flags: coreaudio_sys::kAudioFormatFlagIsFloat,
+            bits_per_channel: 32,
+            channels: 2,
+            bytes_per_frame: 8,
+        }
+    }
+
+    pub(crate) fn sinais_ok() -> LiveSignals {
+        LiveSignals {
+            alive: Some(true),
+            hog_owner: Some(PID_DE_TESTE),
+            nominal_rate: Some(44_100.0),
+            physical: Some(formato_de_teste()),
+        }
+    }
+
+    pub(crate) fn sinais_de_device_morto() -> LiveSignals {
+        LiveSignals {
+            alive: Some(false),
+            ..sinais_ok()
+        }
+    }
+
+    /// Um engine que retém um device de mentira, com a sonda e os listeners na mão do teste.
+    pub(crate) fn engine_retendo(estado: PlayerState) -> (Engine, SondaFalsa, Arc<WatchState>) {
+        engine_retendo_em(estado, &crate::fixtures::path("t44_16.flac"))
+    }
+
+    pub(crate) fn engine_retendo_em(
+        estado: PlayerState,
+        caminho: &str,
+    ) -> (Engine, SondaFalsa, Arc<WatchState>) {
+        let sonda = SondaFalsa {
+            sinais: Arc::new(Mutex::new(sinais_ok())),
+            leituras: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            volume: Arc::new(Mutex::new((Some(0.5), Some(false)))),
+            leituras_de_volume: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        };
+        let engine = Engine::with_probe(Box::new(sonda.clone()));
+        let watch = Arc::new(WatchState::new());
+        engine.hold_for_test(
+            estado,
+            crate::recovery::Baseline {
+                pid: PID_DE_TESTE,
+                nominal_rate: 44_100.0,
+                physical: formato_de_teste(),
+            },
+            Arc::clone(&watch),
+            caminho,
+        );
+        (engine, sonda, watch)
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::testing::*;
     use super::*;
 
     #[test]
@@ -1209,21 +1766,61 @@ mod tests {
             engine.append_tracks(vec!["b.flac".to_string(), "a.wav".to_string()]),
             2
         );
-        assert_eq!(
-            engine.queue_entries(),
-            vec![
-                QueueEntry {
-                    path: "b.flac".to_string(),
-                    failure: None,
-                },
-                QueueEntry {
-                    path: "a.wav".to_string(),
-                    failure: None,
-                },
-            ]
-        );
+        let entries = engine.queue_entries();
+        let paths: Vec<&str> = entries.iter().map(|entry| entry.path.as_str()).collect();
+        assert_eq!(paths, ["b.flac", "a.wav"]);
+        assert!(entries.iter().all(|entry| entry.failure.is_none()));
         assert_eq!(engine.status().queue_len(), 2);
         assert_eq!(engine.status().queue_version(), 1);
+    }
+
+    #[test]
+    fn cada_entrada_ganha_um_id_unico_e_crescente_mesmo_com_caminho_repetido() {
+        let engine = Engine::new();
+        engine.append_tracks(vec!["a.flac".to_string(), "a.flac".to_string()]);
+        engine.append_tracks(vec!["b.flac".to_string()]);
+
+        let ids: Vec<u64> = engine
+            .queue_entries()
+            .iter()
+            .map(|entry| entry.id)
+            .collect();
+        assert_eq!(ids.len(), 3);
+        assert!(ids.windows(2).all(|pair| pair[0] < pair[1]), "{ids:?}");
+    }
+
+    #[test]
+    fn limpar_a_fila_nao_reaproveita_ids() {
+        let engine = Engine::new();
+        engine.append_tracks(vec!["a.flac".to_string()]);
+        let antes = engine.queue_entries()[0].id;
+
+        engine.clear_queue_entries();
+        engine.append_tracks(vec!["a.flac".to_string()]);
+
+        assert!(engine.queue_entries()[0].id > antes);
+    }
+
+    #[test]
+    fn o_indice_de_um_id_acompanha_as_remocoes() {
+        let engine = Engine::new();
+        engine.append_tracks(vec![
+            "a.flac".to_string(),
+            "b.flac".to_string(),
+            "c.flac".to_string(),
+        ]);
+        let ids: Vec<u64> = engine
+            .queue_entries()
+            .iter()
+            .map(|entry| entry.id)
+            .collect();
+
+        engine
+            .remove_queue_entry(0)
+            .expect("deveria remover a primeira");
+
+        assert_eq!(engine.queue_index_of(ids[0]), None);
+        assert_eq!(engine.queue_index_of(ids[2]), Some(1));
     }
 
     #[test]
@@ -1252,6 +1849,244 @@ mod tests {
         assert_eq!(engine.status().queue_len(), 0);
         assert_eq!(engine.status().queue_version(), version + 1);
         assert_eq!(engine.state(), PlayerState::Idle);
+    }
+
+    #[test]
+    fn perda_notificada_so_marca_suspeita_no_poll() {
+        let (engine, sonda, watch) = engine_retendo(PlayerState::Playing);
+        sonda.mudar(sinais_de_device_morto());
+        watch.record(crate::device_watch::Watched::Alive);
+
+        engine.poll_finished();
+
+        // O poll roda na main thread: soltar e restaurar o device ali travaria a janela.
+        assert!(engine.status().device_suspect());
+        assert!(engine.holds_device_for_test());
+        assert_eq!(engine.state(), PlayerState::Playing);
+    }
+
+    #[test]
+    fn sem_notificacao_o_poll_nao_le_o_device() {
+        let (engine, sonda, _watch) = engine_retendo(PlayerState::Paused);
+
+        engine.poll_finished();
+        engine.poll_finished();
+        engine.poll_finished();
+
+        assert_eq!(sonda.leituras(), 0);
+    }
+
+    #[test]
+    fn notificacao_com_device_igual_ao_da_aquisicao_nao_e_suspeita() {
+        // O próprio acquire gera notificações de rate e formato, que podem chegar depois dele.
+        let (engine, sonda, watch) = engine_retendo(PlayerState::Playing);
+        watch.record(crate::device_watch::Watched::NominalRate);
+
+        engine.poll_finished();
+
+        assert_eq!(sonda.leituras(), 1);
+        assert!(!engine.status().device_suspect());
+    }
+
+    #[test]
+    fn mudanca_de_volume_ou_mudo_nao_faz_o_poll_ler_o_device() {
+        // O slider escreve o volume a cada quadro do arrasto; nada disso diz respeito à perda.
+        let (engine, sonda, watch) = engine_retendo(PlayerState::Playing);
+        watch.record(crate::device_watch::Watched::Volume);
+        watch.record(crate::device_watch::Watched::Mute);
+
+        engine.poll_finished();
+
+        assert_eq!(sonda.leituras(), 0);
+    }
+
+    #[test]
+    fn volume_mudado_por_fora_e_adotado_para_a_proxima_faixa() {
+        let (engine, sonda, watch) = engine_retendo(PlayerState::Playing);
+        engine.status().set_volume(0.5);
+        sonda.mudar_volume(Some(0.25), Some(false));
+        watch.record(crate::device_watch::Watched::Volume);
+
+        engine.poll_finished();
+
+        // A faixa seguinte não pode reaplicar os 50% por cima de quem baixou para 25%.
+        assert_eq!(engine.status().volume(), Some(0.25));
+        assert_eq!(engine.requested_volume_for_test(), Some(0.25));
+    }
+
+    #[test]
+    fn o_proprio_volume_notificado_nao_vira_pedido() {
+        let (engine, sonda, watch) = engine_retendo(PlayerState::Playing);
+        engine.status().set_volume(0.5);
+        sonda.mudar_volume(Some(0.5), Some(false));
+        watch.record(crate::device_watch::Watched::Volume);
+
+        engine.poll_finished();
+
+        assert_eq!(engine.requested_volume_for_test(), None);
+    }
+
+    #[test]
+    fn mudo_por_fora_aparece_no_status() {
+        let (engine, sonda, watch) = engine_retendo(PlayerState::Paused);
+        sonda.mudar_volume(Some(0.5), Some(true));
+        watch.record(crate::device_watch::Watched::Mute);
+
+        engine.poll_finished();
+
+        assert!(engine.status().muted());
+    }
+
+    #[test]
+    fn sem_notificacao_de_volume_o_poll_nao_le_o_volume() {
+        let (engine, sonda, _watch) = engine_retendo(PlayerState::Playing);
+        engine.poll_finished();
+        engine.poll_finished();
+        assert_eq!(sonda.leituras_de_volume(), 0);
+    }
+
+    #[test]
+    fn volume_mudado_sem_notificacao_e_lido_antes_de_soltar_o_device() {
+        // A notificação pode não ter chegado quando a faixa acaba: a restauração devolveria o
+        // volume de antes e a mudança se perderia.
+        let (engine, sonda, _watch) = engine_retendo(PlayerState::Finished);
+        engine.status().set_volume(0.5);
+        sonda.mudar_volume(Some(0.25), Some(false));
+
+        engine.shutdown().expect("shutdown sem hardware");
+
+        assert_eq!(engine.requested_volume_for_test(), Some(0.25));
+    }
+
+    #[test]
+    fn retomar_com_formato_mudado_e_partida_que_falha_volta_a_loaded() {
+        // Sem isto o player ficava pausado sem device, e o Play seguinte só dizia "recarregue".
+        let (engine, sonda, _watch) = engine_retendo_em(
+            PlayerState::Paused,
+            "/tmp/hog-audio-nao-existe-retomar.flac",
+        );
+        sonda.mudar(LiveSignals {
+            nominal_rate: Some(48_000.0),
+            ..sinais_ok()
+        });
+
+        assert!(engine.play_classified().is_err());
+
+        assert_eq!(engine.state(), PlayerState::Loaded);
+        assert_eq!(engine.status().state(), PlayerState::Loaded);
+        assert!(!engine.holds_device_for_test());
+    }
+
+    #[test]
+    fn com_o_device_sob_suspeita_o_volume_so_fica_pedido() {
+        // Entre a suspeita e o `recover`, o device pode ser de outro app: escrever nele mexeria
+        // no áudio de quem tomou o hog.
+        let (engine, _sonda, _watch) = engine_retendo(PlayerState::Playing);
+        engine.status().set_device_suspect(true);
+
+        engine
+            .set_volume(0.3)
+            .expect("o pedido deveria ficar guardado");
+
+        assert_eq!(engine.requested_volume_for_test(), Some(f64::from(0.3f32)));
+    }
+
+    #[test]
+    fn volume_de_quem_tomou_o_hog_nao_vira_pedido() {
+        let (engine, sonda, _watch) = engine_retendo(PlayerState::Playing);
+        engine.status().set_volume(0.3);
+        sonda.mudar(LiveSignals {
+            hog_owner: Some(99),
+            ..sinais_ok()
+        });
+        sonda.mudar_volume(Some(0.9), Some(false));
+        engine.status().set_device_suspect(true);
+
+        assert!(engine.recover().is_some());
+
+        assert_eq!(engine.requested_volume_for_test(), None);
+    }
+
+    #[test]
+    fn recover_confirma_a_perda_e_volta_a_loaded_com_a_faixa() {
+        let (engine, sonda, _watch) = engine_retendo(PlayerState::Paused);
+        sonda.mudar(sinais_de_device_morto());
+        engine.status().set_device_suspect(true);
+        engine.status().add_frames(1_000);
+
+        let problema = engine.recover().expect("a perda deveria ser confirmada");
+
+        assert!(problema.contains("desconectado"), "{problema}");
+        assert!(!engine.holds_device_for_test());
+        assert_eq!(engine.state(), PlayerState::Loaded);
+        assert_eq!(engine.status().state(), PlayerState::Loaded);
+        assert!(!engine.status().device_suspect());
+        assert_eq!(engine.status().problem_seq(), 1);
+        assert_eq!(
+            engine.status().problem().as_deref(),
+            Some(problema.as_str())
+        );
+        assert_eq!(engine.status().frames_rendered(), 0);
+        assert_eq!(
+            engine.loaded_path_for_test(),
+            Some(crate::fixtures::path("t44_16.flac"))
+        );
+    }
+
+    #[test]
+    fn recover_com_device_bom_so_limpa_a_suspeita() {
+        let (engine, _sonda, _watch) = engine_retendo(PlayerState::Playing);
+        engine.status().set_device_suspect(true);
+
+        assert_eq!(engine.recover(), None);
+
+        assert!(engine.holds_device_for_test());
+        assert_eq!(engine.state(), PlayerState::Playing);
+        assert!(!engine.status().device_suspect());
+        assert_eq!(engine.status().problem_seq(), 0);
+    }
+
+    #[test]
+    fn carregar_outra_faixa_com_o_device_perdido_e_erro_de_device() {
+        // É o caminho de advance, navigate, select e remove: nenhum deles pode seguir para
+        // outro device por conta própria.
+        let (engine, sonda, _watch) = engine_retendo(PlayerState::Finished);
+        sonda.mudar(sinais_de_device_morto());
+
+        let resultado = engine.load_classified(&crate::fixtures::path("t96_24.flac"));
+
+        assert!(matches!(resultado, Err(LoadFailure::DeviceLost(_))));
+        assert!(!engine.holds_device_for_test());
+        assert_eq!(engine.state(), PlayerState::Loaded);
+        assert_eq!(engine.status().problem_seq(), 1);
+    }
+
+    #[test]
+    fn frames_parados_tocando_fazem_o_poll_conferir_o_device() {
+        let (engine, sonda, _watch) = engine_retendo(PlayerState::Playing);
+        engine.poll_finished();
+        assert_eq!(sonda.leituras(), 0);
+
+        engine.backdate_watchdog_for_test(std::time::Duration::from_millis(600));
+        engine.poll_finished();
+        assert_eq!(sonda.leituras(), 1);
+        assert!(!engine.status().device_suspect());
+
+        sonda.mudar(sinais_de_device_morto());
+        engine.backdate_watchdog_for_test(std::time::Duration::from_millis(600));
+        engine.poll_finished();
+        assert!(engine.status().device_suspect());
+    }
+
+    #[test]
+    fn frames_andando_nao_disparam_o_watchdog() {
+        let (engine, sonda, _watch) = engine_retendo(PlayerState::Playing);
+        engine.backdate_watchdog_for_test(std::time::Duration::from_millis(600));
+        engine.status().add_frames(512);
+
+        engine.poll_finished();
+
+        assert_eq!(sonda.leituras(), 0);
     }
 
     #[test]

@@ -82,6 +82,33 @@ pub fn get_property_array<T: Clone + Default>(
     if status == 0 { Ok(out) } else { Err(status) }
 }
 
+/// Lê uma propriedade `CFString` e a devolve como `String`, já liberando a referência.
+pub fn get_string_property(
+    object: AudioObjectID,
+    address: &AudioObjectPropertyAddress,
+) -> Result<String, OSStatus> {
+    let reference = get_property::<CFStringRef>(object, address)?;
+    // SAFETY: o HAL entrega a `CFString` já retida; a posse passa para `cf_string_into_owned`,
+    // que faz o `CFRelease`.
+    Ok(unsafe { cf_string_into_owned(reference) })
+}
+
+/// Registra `listener` para a propriedade.
+///
+/// # Safety
+///
+/// O HAL passa `context` cru ao `listener` a cada notificação, até o listener ser removido.
+/// Quem chama garante que `context` continua válido durante todo esse tempo.
+pub unsafe fn add_property_listener(
+    object: AudioObjectID,
+    address: &AudioObjectPropertyAddress,
+    listener: AudioObjectPropertyListenerProc,
+    context: *mut std::ffi::c_void,
+) -> Result<(), OSStatus> {
+    let status = unsafe { AudioObjectAddPropertyListener(object, address, listener, context) };
+    if status == 0 { Ok(()) } else { Err(status) }
+}
+
 pub fn has_property(object: AudioObjectID, address: &AudioObjectPropertyAddress) -> bool {
     unsafe { AudioObjectHasProperty(object, address) != 0 }
 }

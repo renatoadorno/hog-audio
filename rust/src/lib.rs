@@ -6,12 +6,14 @@ uniffi::setup_scaffolding!();
 
 pub mod api;
 pub mod device;
+pub mod device_watch;
 pub mod engine;
 pub mod ffi;
 pub mod fixtures;
 pub mod format;
 pub mod playback;
 pub mod queue;
+pub mod recovery;
 pub mod ring;
 pub mod source;
 pub mod status;

@@ -340,9 +340,18 @@ fn run() -> i32 {
         track.total_seconds
     );
 
+    let mut lost_device = false;
     while !interrupted() && engine.state() == PlayerState::Playing {
         std::thread::sleep(std::time::Duration::from_millis(50));
         engine.poll_finished();
+        // Confirmada a perda, o engine já parou e soltou o device: o laço sai porque o estado
+        // deixa de ser Playing.
+        if engine.status().device_suspect()
+            && let Some(problem) = engine.recover()
+        {
+            eprintln!("erro: {problem}");
+            lost_device = true;
+        }
     }
 
     let by_user = interrupted();
@@ -360,6 +369,9 @@ fn run() -> i32 {
         return 1;
     }
 
+    if lost_device {
+        return 1;
+    }
     println!("fim      : device restaurado");
     if by_user { 130 } else { 0 }
 }

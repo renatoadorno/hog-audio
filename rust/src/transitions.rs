@@ -18,6 +18,9 @@ pub enum Command {
     Play,
     Pause,
     Stop,
+    /// O device sumiu ou deixou de ser nosso. A faixa continua carregada; só um Play
+    /// explícito volta a tomar um device.
+    DeviceLost,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -51,6 +54,9 @@ pub fn next_state(current: PlayerState, command: Command) -> Result<PlayerState,
         (Idle | Loaded | Finished | Failed, Pause) => Err(TransitionError {
             message: "não está tocando",
         }),
+
+        (Loaded | Playing | Paused | Finished, DeviceLost) => Ok(Loaded),
+        (Idle | Failed, DeviceLost) => Ok(current),
     }
 }
 
@@ -139,6 +145,29 @@ mod tests {
                 next_state(estado, Command::Pause).is_err(),
                 "pause deveria falhar em {estado:?}"
             );
+        }
+    }
+
+    #[test]
+    fn perder_o_device_volta_a_loaded_com_a_faixa() {
+        for estado in [
+            PlayerState::Loaded,
+            PlayerState::Playing,
+            PlayerState::Paused,
+            PlayerState::Finished,
+        ] {
+            assert_eq!(
+                next_state(estado, Command::DeviceLost),
+                Ok(PlayerState::Loaded),
+                "perder o device em {estado:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn perder_o_device_sem_faixa_nao_muda_o_estado() {
+        for estado in [PlayerState::Idle, PlayerState::Failed] {
+            assert_eq!(next_state(estado, Command::DeviceLost), Ok(estado));
         }
     }
 

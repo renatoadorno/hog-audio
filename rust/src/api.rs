@@ -4,7 +4,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use crate::engine::{Engine, LoadFailure, LoadedTrack, PlayFailure};
+use crate::engine::{Engine, LoadFailure, LoadedTrack, PlayFailure, QueueEntry};
 use crate::queue::{QueueAction, next_playable, on_navigate, on_next, on_previous};
 use crate::source::AudioSource;
 use crate::transitions::PlayerState;
@@ -16,14 +16,24 @@ pub struct Snapshot {
     pub elapsed_seconds: f64,
     pub total_seconds: f64,
     pub underruns: u64,
-    pub volume_scalar: f32,
+    /// `None` antes de haver device e para device sem controle de volume.
+    pub volume_scalar: Option<f32>,
+    pub muted: bool,
     pub current_index: Option<u32>,
     pub queue_len: u32,
     pub queue_version: u64,
+    /// O device parece perdido: a interface chama `recover` para confirmar e parar.
+    pub device_suspect: bool,
+    /// Avança a cada problema novo; o texto vem de `last_problem`.
+    pub problem_seq: u64,
 }
 
+/// `id` é a identidade da linha: único no processo e nunca reaproveitado, nem depois de
+/// limpar a fila. O índice muda a cada remoção, e a fila que a interface tem pode estar
+/// defasada em relação à do engine.
 #[derive(uniffi::Record)]
 pub struct QueueItem {
+    pub id: u64,
     pub path: String,
     pub failure: Option<String>,
 }
@@ -116,25 +126,16 @@ impl HogPlayer {
         self.engine
             .queue_entries()
             .into_iter()
-            .map(|entry| QueueItem {
-                path: entry.path,
-                failure: entry.failure,
-            })
+            .map(queue_item)
             .collect()
     }
 
     /// Como `queue_items`, mas nunca espera: `None` enquanto um comando segura o engine. É o
     /// que a interface usa no poll, para a janela não congelar durante uma troca de device.
     pub fn try_queue_items(&self) -> Option<Vec<QueueItem>> {
-        self.engine.try_queue_entries().map(|entries| {
-            entries
-                .into_iter()
-                .map(|entry| QueueItem {
-                    path: entry.path,
-                    failure: entry.failure,
-                })
-                .collect()
-        })
+        self.engine
+            .try_queue_entries()
+            .map(|entries| entries.into_iter().map(queue_item).collect())
     }
 
     /// Next/Previous somados: `steps` positivo avança, negativo volta, com a regra de
@@ -167,6 +168,17 @@ impl HogPlayer {
         self.engine.reset_timings();
         let was_playing = self.engine.state() == PlayerState::Playing;
         self.load_queue_index(index as usize, was_playing, true)
+    }
+
+    /// O índice é resolvido aqui, sob o lock de comandos: toda mudança na fila passa por ele,
+    /// então o id não troca de posição entre a busca e a carga.
+    pub fn select_track_id(&self, id: u64) -> Result<TrackFormat, PlayerError> {
+        let _command = self.command_lock();
+        self.ensure_running()?;
+        self.engine.reset_timings();
+        let index = self.index_of(id)?;
+        let was_playing = self.engine.state() == PlayerState::Playing;
+        self.load_queue_index(index, was_playing, true)
     }
 
     pub fn next_track(&self) -> Result<TrackFormat, PlayerError> {
@@ -216,27 +228,29 @@ impl HogPlayer {
         }
     }
 
-    pub fn remove_track(&self, index: u32) -> Result<(), PlayerError> {
+    /// Devolve o formato da faixa que assumiu a posição quando a removida era a atual: a
+    /// interface não precisa carregá-la de novo, o que soltaria e tomaria o device outra vez.
+    pub fn remove_track_id(&self, id: u64) -> Result<Option<TrackFormat>, PlayerError> {
         let _command = self.command_lock();
         self.ensure_running()?;
         self.engine.reset_timings();
+        let index = self.index_of(id)?;
         let was_playing = self.engine.state() == PlayerState::Playing;
         let (reload, current) = self
             .engine
-            .remove_queue_entry(index as usize)
+            .remove_queue_entry(index)
             .map_err(|message| PlayerError::State { message })?;
-        if reload {
-            match current {
-                Some(current) => {
-                    self.load_queue_index(current, was_playing, true)?;
-                }
-                None => self
-                    .engine
-                    .shutdown()
-                    .map_err(|message| PlayerError::Device { message })?,
-            }
+        if !reload {
+            return Ok(None);
         }
-        Ok(())
+        match current {
+            Some(current) => self.load_queue_index(current, was_playing, true).map(Some),
+            None => self
+                .engine
+                .shutdown()
+                .map(|()| None)
+                .map_err(|message| PlayerError::Device { message }),
+        }
     }
 
     pub fn clear_queue(&self) -> Result<(), PlayerError> {
@@ -306,10 +320,27 @@ impl HogPlayer {
             total_seconds: status.total_seconds(),
             underruns: status.underruns(),
             volume_scalar: status.volume(),
+            muted: status.muted(),
             current_index: status.current_index(),
             queue_len: status.queue_len(),
             queue_version: status.queue_version(),
+            device_suspect: status.device_suspect(),
+            problem_seq: status.problem_seq(),
         }
+    }
+
+    /// Confirma ao vivo a suspeita que o `snapshot` levantou e, confirmada, para e solta o
+    /// device, com a faixa carregada. `true` quando houve perda; o texto sai em
+    /// `last_problem`. Nunca toca em outro device.
+    pub fn recover(&self) -> Result<bool, PlayerError> {
+        let _command = self.command_lock();
+        self.ensure_running()?;
+        Ok(self.engine.recover().is_some())
+    }
+
+    /// Não pega o lock de comandos: o texto tem mutex próprio.
+    pub fn last_problem(&self) -> Option<String> {
+        self.engine.status().problem()
     }
 
     /// Não pega o lock de comandos: a medição tem mutex próprio, então dá para ler logo depois
@@ -340,6 +371,15 @@ impl HogPlayer {
 }
 
 impl HogPlayer {
+    #[cfg(test)]
+    fn with_engine(engine: Engine) -> Arc<Self> {
+        Arc::new(Self {
+            engine,
+            commands: Mutex::new(()),
+            shutting_down: AtomicBool::new(false),
+        })
+    }
+
     fn command_lock(&self) -> MutexGuard<'_, ()> {
         self.commands
             .lock()
@@ -354,6 +394,14 @@ impl HogPlayer {
         } else {
             Ok(())
         }
+    }
+
+    fn index_of(&self, id: u64) -> Result<usize, PlayerError> {
+        self.engine
+            .queue_index_of(id)
+            .ok_or_else(|| PlayerError::State {
+                message: "a faixa não está mais na fila".to_string(),
+            })
     }
 
     fn execute_manual_action(&self, action: QueueAction) -> Result<TrackFormat, PlayerError> {
@@ -402,6 +450,11 @@ impl HogPlayer {
             Err(LoadFailure::Device(message)) => {
                 return Err(PlayerError::Device { message });
             }
+            Err(LoadFailure::DeviceLost(message)) => {
+                // A faixa pedida ficou carregada, sem device: a fila aponta para ela.
+                self.engine.set_current_index(Some(index));
+                return Err(PlayerError::Device { message });
+            }
         };
 
         self.engine.set_current_index(Some(index));
@@ -426,6 +479,14 @@ impl HogPlayer {
             }
         }
         Ok(track_format(loaded))
+    }
+}
+
+fn queue_item(entry: QueueEntry) -> QueueItem {
+    QueueItem {
+        id: entry.id,
+        path: entry.path,
+        failure: entry.failure,
     }
 }
 
@@ -475,6 +536,61 @@ mod tests {
     use coreaudio_sys::{kAudioDevicePropertyNominalSampleRate, kAudioObjectPropertyScopeGlobal};
 
     #[test]
+    fn a_perda_do_device_atravessa_a_fronteira() {
+        use crate::engine::testing::{engine_retendo, sinais_de_device_morto};
+        let (engine, sonda, watch) = engine_retendo(PlayerState::Playing);
+        let player = HogPlayer::with_engine(engine);
+        sonda.mudar(sinais_de_device_morto());
+        watch.record(crate::device_watch::Watched::Alive);
+
+        let suspeita = player.snapshot();
+        assert!(suspeita.device_suspect);
+        assert_eq!(suspeita.problem_seq, 0);
+
+        assert!(player.recover().expect("recover não deveria falhar"));
+
+        let depois = player.snapshot();
+        assert_eq!(depois.state, PlayerState::Loaded);
+        assert!(!depois.device_suspect);
+        assert_eq!(depois.problem_seq, 1);
+        assert!(
+            player
+                .last_problem()
+                .is_some_and(|texto| texto.contains("desconectado"))
+        );
+    }
+
+    #[test]
+    fn remover_a_atual_com_o_device_perdido_deixa_carregada_a_que_assumiu() {
+        use crate::engine::testing::{engine_retendo, sinais_de_device_morto};
+        let (engine, sonda, _watch) = engine_retendo(PlayerState::Playing);
+        let primeira = crate::fixtures::path("t44_16.flac");
+        let segunda = crate::fixtures::path("t96_24.flac");
+        engine.append_tracks(vec![primeira, segunda.clone()]);
+        engine.set_current_index(Some(0));
+        let player = HogPlayer::with_engine(engine);
+        sonda.mudar(sinais_de_device_morto());
+        let atual = player.queue_items()[0].id;
+
+        assert!(matches!(
+            player.remove_track_id(atual),
+            Err(PlayerError::Device { .. })
+        ));
+
+        // A tela mostra a segunda como atual; o Play seguinte não pode tocar a que saiu.
+        assert_eq!(player.snapshot().current_index, Some(0));
+        assert_eq!(player.snapshot().state, PlayerState::Loaded);
+        assert_eq!(player.engine.loaded_path_for_test(), Some(segunda));
+    }
+
+    #[test]
+    fn recover_sem_device_retido_nao_faz_nada() {
+        let player = HogPlayer::new();
+        assert!(!player.recover().expect("recover não deveria falhar"));
+        assert_eq!(player.last_problem(), None);
+    }
+
+    #[test]
     fn shutdown_fecha_a_fronteira_para_comandos_posteriores() {
         let player = HogPlayer::new();
         player
@@ -488,6 +604,85 @@ mod tests {
         ));
         assert_eq!(player.snapshot().state, PlayerState::Idle);
         assert_eq!(player.snapshot().queue_len, 0);
+    }
+
+    /// Caminhos que não existem: a carga falha na abertura do arquivo, antes de consultar o
+    /// device, então o teste não precisa de hardware.
+    fn fila_sem_arquivos(nomes: &[&str]) -> Arc<HogPlayer> {
+        let player = HogPlayer::new();
+        player.append_tracks(
+            nomes
+                .iter()
+                .map(|nome| format!("/tmp/hog-audio-id-{nome}.flac"))
+                .collect(),
+        );
+        player
+    }
+
+    fn caminhos(player: &HogPlayer) -> Vec<String> {
+        player
+            .queue_items()
+            .into_iter()
+            .map(|item| item.path)
+            .collect()
+    }
+
+    #[test]
+    fn remover_por_id_atinge_a_faixa_certa_depois_de_outra_remocao() {
+        let player = fila_sem_arquivos(&["a", "b", "c"]);
+        let itens = player.queue_items();
+        let (b, c) = (itens[1].id, itens[2].id);
+
+        // Com índices, a interface defasada mandaria "remover 1" duas vezes e apagaria b e c
+        // só por coincidência; com ids, cada pedido diz qual linha é.
+        assert!(
+            player
+                .remove_track_id(b)
+                .expect("deveria remover b")
+                .is_none()
+        );
+        assert!(
+            player
+                .remove_track_id(c)
+                .expect("deveria remover c")
+                .is_none()
+        );
+
+        assert_eq!(caminhos(&player), ["/tmp/hog-audio-id-a.flac"]);
+    }
+
+    #[test]
+    fn id_que_ja_saiu_da_fila_e_recusado_sem_mudar_nada() {
+        let player = fila_sem_arquivos(&["a", "b"]);
+        let b = player.queue_items()[1].id;
+        player.remove_track_id(b).expect("deveria remover b");
+        let versao = player.snapshot().queue_version;
+
+        assert!(matches!(
+            player.remove_track_id(b),
+            Err(PlayerError::State { .. })
+        ));
+        assert!(matches!(
+            player.select_track_id(b),
+            Err(PlayerError::State { .. })
+        ));
+        assert_eq!(caminhos(&player), ["/tmp/hog-audio-id-a.flac"]);
+        assert_eq!(player.snapshot().queue_version, versao);
+    }
+
+    #[test]
+    fn selecionar_por_id_carrega_a_faixa_desse_id() {
+        let player = fila_sem_arquivos(&["a", "b", "c"]);
+        let c = player.queue_items()[2].id;
+
+        // O arquivo não existe: a carga falha, mas a faixa de c passa a ser a atual e fica
+        // marcada — é isso que prova que o id chegou à linha certa.
+        assert!(matches!(
+            player.select_track_id(c),
+            Err(PlayerError::Load { .. })
+        ));
+        assert_eq!(player.snapshot().current_index, Some(2));
+        assert!(player.queue_items()[2].failure.is_some());
     }
 
     #[test]
@@ -596,6 +791,26 @@ mod tests {
         assert_eq!(snapshot.state, PlayerState::Finished);
         assert_eq!(snapshot.current_index, Some(2));
         player.shutdown().expect("deveria restaurar o device");
+    }
+
+    #[test]
+    #[ignore = "precisa negociar o formato com um device de saída real"]
+    fn remover_a_faixa_atual_devolve_o_formato_de_quem_assumiu() {
+        let player = HogPlayer::new();
+        player.append_tracks(vec![
+            crate::fixtures::path("t96_24.flac"),
+            crate::fixtures::path("t44_16.flac"),
+        ]);
+        let atual = player.queue_items()[0].id;
+
+        let assumiu = player
+            .remove_track_id(atual)
+            .expect("deveria remover a atual")
+            .expect("a segunda deveria assumir");
+
+        assert_eq!(assumiu.sample_rate, 44_100.0);
+        assert_eq!(player.snapshot().current_index, Some(0));
+        player.shutdown().expect("deveria encerrar");
     }
 
     #[test]

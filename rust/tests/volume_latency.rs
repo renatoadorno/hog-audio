@@ -35,7 +35,10 @@ fn arrasto_do_slider_chega_ao_hardware_sem_atraso_perceptivel() {
     let arrasto = inicio.elapsed();
 
     // O último valor pedido tem de ser o que ficou no hardware: rápido e errado não serve.
-    let volume_final = engine.status().volume();
+    let volume_final = engine
+        .status()
+        .volume()
+        .expect("o device do teste deveria ter controle de volume");
     engine.shutdown().expect("shutdown");
 
     let por_pedido = arrasto.as_secs_f64() * 1000.0 / REQUESTS as f64;
