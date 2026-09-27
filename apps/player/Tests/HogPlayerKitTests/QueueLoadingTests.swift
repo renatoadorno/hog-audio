@@ -44,7 +44,7 @@ private func modelo(
 ) -> (PlayerViewModel, FakePlayer) {
     let fake = FakePlayer()
     let model = PlayerViewModel(player: fake, loadEntry: carregador(registro))
-    fake.itens = paths.map { QueueItem(path: $0, failure: nil) }
+    fake.itens = itens(paths)
     fake.indiceAtual = 0
     fake.estado = .loaded
     fake.versaoFila += 1
@@ -105,7 +105,7 @@ private func modelo(
     let (model, fake) = modelo(com: ["/tmp/a.flac"], registro)
     await model.entryLoading?.value
 
-    fake.itens.append(QueueItem(path: "/tmp/b.flac", failure: nil))
+    fake.acrescentar("/tmp/b.flac")
     fake.versaoFila += 1
     model.refresh()
     await model.entryLoading?.value

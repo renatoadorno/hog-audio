@@ -38,28 +38,34 @@ private func snap(
     queueLen: UInt32 = 1
 ) -> Snapshot {
     Snapshot(state: state, elapsedSeconds: elapsed, totalSeconds: 208.7,
-             underruns: underruns, volumeScalar: 0.5,
-             currentIndex: current, queueLen: queueLen, queueVersion: 0)
+             underruns: underruns, volumeScalar: 0.5, muted: false,
+             currentIndex: current, queueLen: queueLen, queueVersion: 0,
+             deviceSuspect: false, problemSeq: 0)
 }
 
-@Test func tocandoMostraPausarEOProgresso() {
+@Test func tocandoMostraPausar() {
     let d = displayState(snapshot: snap(.playing, elapsed: 83), metadata: tags, format: faixa)
     #expect(d.isPlaying)
     #expect(d.canPause)
-    #expect(d.elapsed == "1:23")
-    #expect(d.total == "3:28")
-    #expect(abs(d.progress - 83 / 208.7) < 0.001)
     #expect(d.title == "House of Memories")
+}
+
+@Test func oRelogioMostraOTempoEOProgresso() {
+    let c = clockState(snapshot: snap(.playing, elapsed: 83))
+    #expect(c.elapsed == "1:23")
+    #expect(c.total == "3:28")
+    #expect(abs(c.progress - 83 / 208.7) < 0.001)
 }
 
 @Test func semFaixaCarregadaNaoDaParaTocar() {
     let vazio = Snapshot(state: .idle, elapsedSeconds: 0, totalSeconds: 0,
-                         underruns: 0, volumeScalar: 0.5,
-                         currentIndex: nil, queueLen: 0, queueVersion: 0)
+                         underruns: 0, volumeScalar: 0.5, muted: false,
+                         currentIndex: nil, queueLen: 0, queueVersion: 0,
+                         deviceSuspect: false, problemSeq: 0)
     let d = displayState(snapshot: vazio, metadata: nil, format: nil)
     #expect(!d.canPlay)
     #expect(!d.canPause)
-    #expect(d.progress == 0)
+    #expect(clockState(snapshot: vazio).progress == 0)
     #expect(d.technicalLine.isEmpty)
 }
 

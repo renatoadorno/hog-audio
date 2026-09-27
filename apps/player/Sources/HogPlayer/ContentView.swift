@@ -52,10 +52,12 @@ private struct Artwork: Sendable {
     }
 }
 
+/// A tela lê o `PlayerViewModel` por `@Observable`: cada body é recalculado só quando muda
+/// algo que ele leu. Por isso o relógio, o volume e a fila são structs próprias — o que muda a
+/// cada tique ou a cada quadro de arrasto não recalcula a coluna inteira.
 struct ContentView: View {
-    @ObservedObject var model: PlayerViewModel
+    let model: PlayerViewModel
     @State private var dropError: String?
-    @State private var selectedIndex: UInt32?
     @State private var isDropTarget = false
     @State private var artwork: Artwork?
 
@@ -73,7 +75,7 @@ struct ContentView: View {
                         .frame(maxHeight: .infinity, alignment: .top)
                     VStack(spacing: 12) {
                         statusArea
-                        queuePanel
+                        QueuePanel(model: model, isPlaying: model.display.isPlaying)
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                 }
@@ -100,7 +102,6 @@ struct ContentView: View {
                 .padding(8)
         }
         .onDrop(of: [.fileURL], isTargeted: $isDropTarget, perform: handleDrop)
-        .onChange(of: model.currentIndex) { _, index in selectedIndex = index }
         .task(id: model.display.artwork) {
             let data = model.display.artwork
             let decoded = await Task.detached { data.flatMap(Artwork.init(data:)) }.value
@@ -119,9 +120,9 @@ struct ContentView: View {
                 .aspectRatio(1, contentMode: .fit)
                 .frame(maxWidth: coverSide, maxHeight: coverSide)
             trackInfo
-            clock
+            ClockView(model: model)
             transport
-            volume
+            VolumeControl(model: model)
             if !model.display.technicalLine.isEmpty {
                 Text(model.display.technicalLine)
                     .font(.caption2.monospaced())
@@ -149,20 +150,6 @@ struct ContentView: View {
                     .foregroundStyle(.tertiary)
                     .lineLimit(1)
             }
-        }
-    }
-
-    private var clock: some View {
-        VStack(spacing: 4) {
-            ProgressView(value: model.display.progress)
-                .progressViewStyle(.linear)
-            HStack {
-                Text(model.display.elapsed)
-                Spacer()
-                Text(model.display.total)
-            }
-            .font(.caption.monospacedDigit())
-            .foregroundStyle(.secondary)
         }
     }
 
@@ -213,105 +200,6 @@ struct ContentView: View {
         .disabled(!enabled)
         .opacity(enabled ? 1 : 0.32)
         .accessibilityLabel(label)
-    }
-
-    private var volume: some View {
-        HStack(spacing: 8) {
-            Image(systemName: model.volume < 0.01 ? "speaker.slash.fill" : "speaker.wave.2.fill")
-                .foregroundStyle(accent)
-                .frame(width: 20)
-            Slider(value: Binding(
-                get: { model.volume },
-                set: { model.applyVolume($0) }
-            ), in: 0...1)
-            Text("\(Int(model.volume * 100))%")
-                .font(.caption.monospacedDigit().weight(.semibold))
-                .foregroundStyle(.secondary)
-                .frame(width: 40, alignment: .trailing)
-        }
-    }
-
-    private var queuePanel: some View {
-        VStack(spacing: 8) {
-            HStack {
-                Text("FILA")
-                    .font(.caption.weight(.bold))
-                    .foregroundStyle(.secondary)
-                Text("\(model.queue.count)")
-                    .font(.caption2.monospacedDigit().weight(.bold))
-                    .foregroundStyle(accent)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(accent.opacity(0.12), in: Capsule())
-                Spacer()
-                Button("Limpar", action: model.clearQueue)
-                    .buttonStyle(.plain)
-                    .font(.caption.weight(.medium))
-                    .foregroundStyle(model.queue.isEmpty ? Color.secondary : accent)
-                    .disabled(model.queue.isEmpty)
-            }
-            .padding(.horizontal, 4)
-            if model.queue.isEmpty {
-                VStack(spacing: 8) {
-                    Image(systemName: "music.note.list")
-                        .font(.title2)
-                        .foregroundStyle(accent.opacity(0.8))
-                    Text("Arraste músicas ou uma pasta para começar")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                queue
-            }
-        }
-        .padding(12)
-        .frame(maxHeight: .infinity)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
-    }
-
-    private var queue: some View {
-        ScrollViewReader { proxy in
-            List(selection: $selectedIndex) {
-                ForEach(Array(model.queue.enumerated()), id: \.offset) { index, item in
-                    queueRow(index: index, path: item.path, failure: item.failure)
-                        .tag(UInt32(index))
-                        .contentShape(Rectangle())
-                        .onTapGesture {
-                            selectedIndex = UInt32(index)
-                            model.selectTrack(index: UInt32(index))
-                        }
-                }
-            }
-            .listStyle(.inset)
-            .scrollContentBackground(.hidden)
-            .frame(maxHeight: .infinity)
-            .onDeleteCommand {
-                guard let selectedIndex else { return }
-                self.selectedIndex = nil
-                model.removeTrack(index: selectedIndex)
-            }
-            // A lista chega inteira de uma vez e abre rolada até o fim, escondendo o início;
-            // no auto-avanço, a faixa atual sairia de vista. Levar a rolagem até ela resolve
-            // os dois.
-            .onChange(of: model.currentIndex, initial: true) { _, index in
-                guard let index else { return }
-                proxy.scrollTo(Int(index))
-            }
-        }
-    }
-
-    private func queueRow(index: Int, path: String, failure: String?) -> QueueRow {
-        let isCurrent = UInt32(index) == model.currentIndex
-        return QueueRow(
-            entry: model.entries[path],
-            fallbackName: URL(fileURLWithPath: path).deletingPathExtension().lastPathComponent,
-            isCurrent: isCurrent,
-            // Só a linha atual depende do play/pause: passar o estado a todas faria a fila
-            // inteira redesenhar a cada toque no botão.
-            isPlaying: isCurrent && model.display.isPlaying,
-            failure: failure
-        )
     }
 
     @ViewBuilder
@@ -427,5 +315,147 @@ private struct ArtworkBackdrop: View {
         .clipped()
         .animation(.easeInOut(duration: 0.4), value: image.map(ObjectIdentifier.init))
         .ignoresSafeArea()
+    }
+}
+
+/// Lê só `model.clock`: é o único trecho da tela que muda a cada tique enquanto toca.
+private struct ClockView: View {
+    let model: PlayerViewModel
+
+    var body: some View {
+        let clock = model.clock
+        VStack(spacing: 4) {
+            ProgressView(value: clock.progress)
+                .progressViewStyle(.linear)
+            HStack {
+                Text(clock.elapsed)
+                Spacer()
+                Text(clock.total)
+            }
+            .font(.caption.monospacedDigit())
+            .foregroundStyle(.secondary)
+        }
+    }
+}
+
+/// O slider publica um valor por quadro de arrasto: só esta struct lê `model.volume` e
+/// `model.muted`.
+private struct VolumeControl: View {
+    let model: PlayerViewModel
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: model.muted || model.volume < 0.01
+                ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                .foregroundStyle(Color.hogAccent)
+                .frame(width: 20)
+                .help(model.muted ? "O device está no mudo" : "")
+            Slider(value: Binding(
+                get: { model.volume },
+                set: { model.applyVolume($0) }
+            ), in: 0...1, onEditingChanged: model.setVolumeEditing)
+            Text("\(Int(model.volume * 100))%")
+                .font(.caption.monospacedDigit().weight(.semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: 40, alignment: .trailing)
+        }
+    }
+}
+
+private struct QueuePanel: View {
+    let model: PlayerViewModel
+    /// Por valor: ler `model.display.isPlaying` aqui assinaria o `display` inteiro, e a fila
+    /// seria recalculada a cada troca de título ou de capa.
+    let isPlaying: Bool
+    @State private var selectedID: UInt64?
+
+    private let accent = Color.hogAccent
+
+    var body: some View {
+        VStack(spacing: 8) {
+            HStack {
+                Text("FILA")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(.secondary)
+                Text("\(model.queue.count)")
+                    .font(.caption2.monospacedDigit().weight(.bold))
+                    .foregroundStyle(accent)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(accent.opacity(0.12), in: Capsule())
+                Spacer()
+                Button("Limpar", action: model.clearQueue)
+                    .buttonStyle(.plain)
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(model.queue.isEmpty ? Color.secondary : accent)
+                    .disabled(model.queue.isEmpty)
+            }
+            .padding(.horizontal, 4)
+            if model.queue.isEmpty {
+                VStack(spacing: 8) {
+                    Image(systemName: "music.note.list")
+                        .font(.title2)
+                        .foregroundStyle(accent.opacity(0.8))
+                    Text("Arraste músicas ou uma pasta para começar")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                queue
+            }
+        }
+        .padding(12)
+        .frame(maxHeight: .infinity)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+        .onChange(of: model.currentItemID) { _, id in selectedID = id }
+    }
+
+    private var queue: some View {
+        ScrollViewReader { proxy in
+            List(selection: $selectedID) {
+                // A identidade é o id da entrada: com o índice, remover uma linha do meio fazia
+                // o SwiftUI tratar todas as seguintes como linhas novas.
+                ForEach(Array(model.queue.enumerated()), id: \.element.id) { index, item in
+                    queueRow(index: index, path: item.path, failure: item.failure)
+                        .tag(item.id)
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            selectedID = item.id
+                            model.selectTrack(id: item.id)
+                        }
+                }
+            }
+            .listStyle(.inset)
+            .scrollContentBackground(.hidden)
+            .frame(maxHeight: .infinity)
+            .onDeleteCommand {
+                guard let selectedID else { return }
+                self.selectedID = nil
+                model.removeTrack(id: selectedID)
+            }
+            // A lista chega inteira de uma vez e abre rolada até o fim, escondendo o início;
+            // no auto-avanço, a faixa atual sairia de vista. Levar a rolagem até ela resolve
+            // os dois.
+            // `scrollTo` casa o valor com o id do `ForEach` pelo tipo: um `Int` aqui não acha
+            // a linha `UInt64` e falha calado.
+            .onChange(of: model.currentItemID, initial: true) { _, id in
+                guard let id else { return }
+                proxy.scrollTo(id)
+            }
+        }
+    }
+
+    private func queueRow(index: Int, path: String, failure: String?) -> QueueRow {
+        let isCurrent = UInt32(index) == model.currentIndex
+        return QueueRow(
+            entry: model.entries[path],
+            fallbackName: URL(fileURLWithPath: path).deletingPathExtension().lastPathComponent,
+            isCurrent: isCurrent,
+            // Só a linha atual depende do play/pause: passar o estado a todas faria a fila
+            // inteira redesenhar a cada toque no botão.
+            isPlaying: isCurrent && isPlaying,
+            failure: failure
+        )
     }
 }

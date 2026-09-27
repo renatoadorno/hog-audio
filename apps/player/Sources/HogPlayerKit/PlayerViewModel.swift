@@ -1,5 +1,6 @@
 import Foundation
 import HogAudioBindings
+import Observation
 import os
 
 // O protocolo que o ViewModel consome é o `HogPlayerProtocol` **gerado pelo uniffi** — ele já
@@ -13,20 +14,26 @@ private func milliseconds(_ duration: Duration) -> Double {
     return Double(seconds) * 1000 + Double(attoseconds) / 1e15
 }
 
+/// Só o que a tela lê é observado; o resto é `@ObservationIgnored`. Uma atribuição de valor
+/// igual não notifica: a macro compara os tipos `Equatable` antes de avisar quem observa.
+@Observable
 @MainActor
-public final class PlayerViewModel: ObservableObject {
-    @Published public private(set) var display: DisplayState
-    @Published public var volume: Double = 0.5
-    @Published public private(set) var errorMessage: String?
-    @Published public private(set) var queue: [QueueItem] = []
-    @Published public private(set) var currentIndex: UInt32?
+public final class PlayerViewModel {
+    public private(set) var display: DisplayState
+    /// Separado de `display` porque muda a cada tique enquanto toca.
+    public private(set) var clock: ClockState
+    public var volume: Double = 0.5
+    public private(set) var muted = false
+    public private(set) var errorMessage: String?
+    public private(set) var queue: [QueueItem] = []
+    public private(set) var currentIndex: UInt32?
     /// Título, capa, qualidade e duração de cada faixa da fila, pelo caminho. Chega aos poucos
     /// depois que a faixa entra na fila; até lá a linha mostra o nome do arquivo.
-    @Published public private(set) var entries: [String: QueueEntryInfo] = [:]
+    public private(set) var entries: [String: QueueEntryInfo] = [:]
 
     /// A carga das linhas em andamento, exposta pelo mesmo motivo de `pendingCommand`: quem
     /// precisar saber quando terminou aguarda a task em vez de adivinhar por tempo.
-    public private(set) var entryLoading: Task<Void, Never>?
+    @ObservationIgnored public private(set) var entryLoading: Task<Void, Never>?
 
     /// A task do último comando emitido. Existe para que quem precise saber quando o comando
     /// terminou possa aguardá-la, em vez de adivinhar por tempo — e para que dois comandos
@@ -35,44 +42,53 @@ public final class PlayerViewModel: ObservableObject {
     /// Os comandos de transporte são encadeados por `serializedCommand`; o worker de volume
     /// pode rodar em paralelo porque coalesce pedidos e o mutex do Rust protege o hardware.
     /// `pendingCommand` continua expondo a task mais recente para testes e desligamento.
-    public private(set) var pendingCommand: Task<Void, Never>?
-    private var serializedCommand: Task<Void, Never>?
+    @ObservationIgnored public private(set) var pendingCommand: Task<Void, Never>?
+    @ObservationIgnored private var serializedCommand: Task<Void, Never>?
 
     private let player: any HogPlayerProtocol
     private let loadEntry: @Sendable (String) async -> QueueEntryInfo
-    private var metadata: TrackMetadata?
-    private var format: TrackFormat?
-    private var timer: Timer?
-    private var lastQueueVersion: UInt64?
-    private var advancing = false
-    private var advancedFinishedIndex: UInt32?
-    private var transportCommandsInFlight = 0
-    private var shuttingDown = false
+    @ObservationIgnored private var metadata: TrackMetadata?
+    @ObservationIgnored private var format: TrackFormat?
+    @ObservationIgnored private var timer: Timer?
+    @ObservationIgnored private var lastQueueVersion: UInt64?
+    @ObservationIgnored private var advancing = false
+    @ObservationIgnored private var advancedFinishedIndex: UInt32?
+    @ObservationIgnored private var transportCommandsInFlight = 0
+    @ObservationIgnored private var shuttingDown = false
+    /// O último problema do engine já copiado para `errorMessage`, e se uma recuperação do
+    /// device está na fila de comandos.
+    @ObservationIgnored private var lastProblemSeq: UInt64 = 0
+    @ObservationIgnored private var recovering = false
+    /// O `lastProblemSeq` quando o comando de transporte atual começou. Os comandos de
+    /// transporte são encadeados, então um valor só basta.
+    @ObservationIgnored private var problemSeqAtCommandStart: UInt64 = 0
 
     /// O volume que o usuário pediu por último e que ainda não foi ao hardware, e se já há um
     /// worker drenando. Ambos vivem na main actor, então o arrasto os atualiza sem trava.
     /// Ver `applyVolume()`.
-    private var volumeDesejado: Double?
-    private var escrevendoVolume = false
+    @ObservationIgnored private var volumeDesejado: Double?
+    @ObservationIgnored private var escrevendoVolume = false
+    /// O usuário está com o slider na mão.
+    @ObservationIgnored private var volumeEditing = false
 
     /// Soltar uma pasta de mil faixas não pode disparar mil leituras de tag e decodificações
     /// de capa ao mesmo tempo: quatro mantêm a lista enchendo de cima para baixo sem disputar
     /// CPU e disco com a reprodução.
     private let maxConcurrentEntryLoads = 4
-    private var pendingEntryPaths: [String] = []
-    private var loadingEntryPaths: Set<String> = []
-    private var queuedPaths: Set<String> = []
+    @ObservationIgnored private var pendingEntryPaths: [String] = []
+    @ObservationIgnored private var loadingEntryPaths: Set<String> = []
+    @ObservationIgnored private var queuedPaths: Set<String> = []
 
     /// Os metadados completos (com a capa em resolução cheia) da faixa atual carregam fora da
     /// cadeia de comandos: o próximo Next não espera por eles. `metadataPath` diz de qual
     /// faixa são os que estão em `metadata`.
     private let metadataLoader: @Sendable (URL) async -> TrackMetadata
-    private var metadataPath: String?
-    public private(set) var metadataLoading: Task<Void, Never>?
+    @ObservationIgnored private var metadataPath: String?
+    @ObservationIgnored public private(set) var metadataLoading: Task<Void, Never>?
 
     /// A navegação que ainda espera o comando anterior terminar. Cliques novos somam nela em
     /// vez de enfileirar outra carga; `nil` quando nenhuma está esperando.
-    private var pendingNavigation: NavigationRequest?
+    @ObservationIgnored private var pendingNavigation: NavigationRequest?
 
     public init(
         player: any HogPlayerProtocol,
@@ -84,9 +100,12 @@ public final class PlayerViewModel: ObservableObject {
         self.metadataLoader = metadataLoader
         let snapshot = player.snapshot()
         self.display = displayState(snapshot: snapshot, metadata: nil, format: nil)
+        self.clock = clockState(snapshot: snapshot)
         self.currentIndex = snapshot.currentIndex
         self.queue = player.queueItems()
         self.lastQueueVersion = snapshot.queueVersion
+        // Um problema de antes de a janela abrir não é notícia.
+        self.lastProblemSeq = snapshot.problemSeq
         syncEntries()
     }
 
@@ -103,6 +122,9 @@ public final class PlayerViewModel: ObservableObject {
         let timer = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refresh() }
         }
+        // Folga para o sistema agrupar este disparo com outros e acordar a CPU menos vezes;
+        // 20 ms num relógio de 100 ms não se vê.
+        timer.tolerance = 0.02
         // No modo padrão o timer para enquanto o usuário arrasta o volume ou rola a fila: o
         // relógio congelava e o fim da faixa só era percebido quando ele soltava.
         RunLoop.main.add(timer, forMode: .common)
@@ -125,11 +147,7 @@ public final class PlayerViewModel: ObservableObject {
 
     public func refresh() {
         let snapshot = player.snapshot()
-        // Atribuir sem mudança republica e força a tela inteira a se recalcular, dez vezes
-        // por segundo, mesmo com o player parado.
-        if currentIndex != snapshot.currentIndex {
-            currentIndex = snapshot.currentIndex
-        }
+        currentIndex = snapshot.currentIndex
         // `tryQueueItems` nunca espera o engine: com um comando segurando o lock (troca de
         // device leva segundos), a versão não avança e o próximo tique tenta de novo.
         if lastQueueVersion != snapshot.queueVersion, let items = player.tryQueueItems() {
@@ -137,13 +155,25 @@ public final class PlayerViewModel: ObservableObject {
             lastQueueVersion = snapshot.queueVersion
             syncEntries()
         }
-        let shown = displayState(
+        display = displayState(
             snapshot: snapshot,
             metadata: shownMetadata(for: snapshot.currentIndex),
             format: format
         )
-        if display != shown {
-            display = shown
+        clock = clockState(snapshot: snapshot)
+        muted = snapshot.muted
+        followDeviceVolume(snapshot)
+
+        if snapshot.problemSeq != lastProblemSeq {
+            lastProblemSeq = snapshot.problemSeq
+            if let problem = player.lastProblem() {
+                errorMessage = problem
+            }
+        }
+        // Antes do auto-avanço: a recuperação entra em `transportCommandsInFlight`, e é isso
+        // que o impede de tocar a faixa seguinte no device que o macOS pôs no lugar do perdido.
+        if snapshot.deviceSuspect, !recovering, !shuttingDown {
+            recoverDevice()
         }
 
         if snapshot.state != .finished {
@@ -158,6 +188,36 @@ public final class PlayerViewModel: ObservableObject {
            advancedFinishedIndex != current {
             advanceFromFinished(index: current)
         }
+    }
+
+    /// Um comando bem-sucedido limpa o erro de antes dele, mas não um problema que o engine
+    /// publicou durante o próprio comando e um tique do poll já mostrou — o aviso de volume
+    /// que voltou ao teto sai no fim do Play.
+    private func clearErrorFromBeforeCommand() {
+        if lastProblemSeq == problemSeqAtCommandStart {
+            errorMessage = nil
+        }
+    }
+
+    /// O engine só detecta a perda no poll; confirmar e parar é um comando, na mesma fila
+    /// dos outros, fora da main actor.
+    private func recoverDevice() {
+        recovering = true
+        let previous = serializedCommand
+        transportCommandsInFlight += 1
+        let task = Task {
+            defer {
+                recovering = false
+                transportCommandsInFlight -= 1
+            }
+            await previous?.value
+            guard !shuttingDown else { return }
+            // A única falha possível é o player já estar encerrando.
+            _ = try? await Task.detached { [player] in try player.recover() }.value
+            refresh()
+        }
+        serializedCommand = task
+        pendingCommand = task
     }
 
     public func open(url: URL) {
@@ -184,6 +244,12 @@ public final class PlayerViewModel: ObservableObject {
     private var currentPath: String? {
         guard let currentIndex, Int(currentIndex) < queue.count else { return nil }
         return queue[Int(currentIndex)].path
+    }
+
+    /// A linha da faixa atual: é por ela que a fila marca a seleção e rola até a atual.
+    public var currentItemID: UInt64? {
+        guard let currentIndex, Int(currentIndex) < queue.count else { return nil }
+        return queue[Int(currentIndex)].id
     }
 
     /// Alinha as linhas carregadas com a fila atual: descarta as de caminhos que saíram e
@@ -249,15 +315,20 @@ public final class PlayerViewModel: ObservableObject {
             refresh()
             if wasEmpty {
                 // `appendTracks` mantém a assinatura simples da fronteira e não propaga a
-                // falha da carga inicial. A seleção explícita torna esse erro visível.
-                await loadSelection(index: 0, command: "carga inicial", queuedAt: queuedAt)
+                // falha da carga inicial. A seleção explícita torna esse erro visível. A fila
+                // estava vazia e os comandos são encadeados: a posição 0 é a faixa que entrou.
+                await loadSelection(command: "carga inicial", queuedAt: queuedAt) { [player] in
+                    try player.selectTrack(index: 0)
+                }
             }
         }
         serializedCommand = task
         pendingCommand = task
     }
 
-    public func selectTrack(index: UInt32) {
+    /// Por id, não por índice: a fila da tela pode estar defasada em relação à do engine, e
+    /// o índice de uma linha muda a cada remoção.
+    public func selectTrack(id: UInt64) {
         guard !shuttingDown else { return }
         let queuedAt = ContinuousClock.now
         let previous = serializedCommand
@@ -266,7 +337,9 @@ public final class PlayerViewModel: ObservableObject {
             defer { transportCommandsInFlight -= 1 }
             await previous?.value
             guard !shuttingDown else { return }
-            await loadSelection(index: index, command: "seleção", queuedAt: queuedAt)
+            await loadSelection(command: "seleção", queuedAt: queuedAt) { [player] in
+                try player.selectTrackId(id: id)
+            }
         }
         serializedCommand = task
         pendingCommand = task
@@ -318,7 +391,7 @@ public final class PlayerViewModel: ObservableObject {
         pendingCommand = task
     }
 
-    public func removeTrack(index: UInt32) {
+    public func removeTrack(id: UInt64) {
         guard !shuttingDown else { return }
         let queuedAt = ContinuousClock.now
         let previous = serializedCommand
@@ -327,18 +400,23 @@ public final class PlayerViewModel: ObservableObject {
             defer { transportCommandsInFlight -= 1 }
             await previous?.value
             guard !shuttingDown else { return }
-            let removedCurrent = currentIndex == index
+            let removedCurrent = currentItemID == id
             do {
-                try await Task.detached { [player] in try player.removeTrack(index: index) }.value
-                errorMessage = nil
-                refresh()
-                if removedCurrent, let currentIndex {
-                    // `removeTrack` não devolve o formato de quem assumiu a posição.
-                    await loadSelection(index: currentIndex, command: "remoção", queuedAt: queuedAt)
-                } else if removedCurrent {
-                    metadata = nil
-                    metadataPath = nil
-                    format = nil
+                // Removida a atual, o engine já carregou quem assumiu a posição e devolve o
+                // formato dela.
+                let loaded = try await timed("remoção", queuedAt: queuedAt) { [player] in
+                    try player.removeTrackId(id: id)
+                }
+                if let loaded {
+                    apply(loaded: loaded)
+                } else {
+                    clearErrorFromBeforeCommand()
+                    if removedCurrent {
+                        metadataLoading?.cancel()
+                        metadata = nil
+                        metadataPath = nil
+                        format = nil
+                    }
                     refresh()
                 }
             } catch {
@@ -375,14 +453,12 @@ public final class PlayerViewModel: ObservableObject {
     }
 
     private func loadSelection(
-        index: UInt32,
         command: String,
-        queuedAt: ContinuousClock.Instant
+        queuedAt: ContinuousClock.Instant,
+        _ select: @escaping @Sendable () throws -> TrackFormat
     ) async {
         do {
-            let loaded = try await timed(command, queuedAt: queuedAt) { [player] in
-                try player.selectTrack(index: index)
-            }
+            let loaded = try await timed(command, queuedAt: queuedAt, select)
             apply(loaded: loaded)
         } catch {
             errorMessage = "\(error)"
@@ -395,7 +471,7 @@ public final class PlayerViewModel: ObservableObject {
     /// (`shownMetadata`) e a capa chega quando a leitura terminar.
     private func apply(loaded: TrackFormat) {
         format = loaded
-        errorMessage = nil
+        clearErrorFromBeforeCommand()
         refresh()
         reloadMetadataForCurrentTrack()
     }
@@ -433,6 +509,7 @@ public final class PlayerViewModel: ObservableObject {
         _ work: @escaping @Sendable () throws -> T
     ) async throws -> T {
         let startedAt = ContinuousClock.now
+        problemSeqAtCommandStart = lastProblemSeq
         defer { logTransition(command, queuedAt: queuedAt, startedAt: startedAt) }
         return try await Task.detached { try work() }.value
     }
@@ -519,14 +596,16 @@ public final class PlayerViewModel: ObservableObject {
                 }
                 // Limpa uma falha anterior: sem isto, um play() que falhou deixaria a
                 // mensagem de erro presa na tela mesmo depois de um pause() bem-sucedido.
-                errorMessage = nil
+                clearErrorFromBeforeCommand()
             } catch {
                 errorMessage = "\(error)"
             }
             // Só o `play()` publica volume no `SharedStatus` do lado Rust — quando o teto de
             // segurança agiu, é aqui, ao fim do comando, que o slider precisa reler o valor
             // real do hardware.
-            volume = Double(player.snapshot().volumeScalar)
+            if let scalar = player.snapshot().volumeScalar {
+                volume = Double(scalar)
+            }
             refresh()
         }
         serializedCommand = task
@@ -573,10 +652,35 @@ public final class PlayerViewModel: ObservableObject {
                     // de cache próprio. Pedidos ainda pendentes são descartados junto: insistir
                     // com o resto do arrasto por cima de uma recusa só repetiria o erro.
                     volumeDesejado = nil
-                    volume = Double(player.snapshot().volumeScalar)
+                    if let scalar = player.snapshot().volumeScalar {
+                        volume = Double(scalar)
+                    }
                     errorMessage = "\(error)"
                 }
             }
+        }
+    }
+
+    public func setVolumeEditing(_ editing: Bool) {
+        volumeEditing = editing
+    }
+
+    /// O slider acompanha o volume mudado por fora só quando nada nosso mexe nele: fora de
+    /// Playing e Paused o device está sendo trocado ou já não é nosso, e durante um arrasto,
+    /// uma escrita ou um comando o hardware ainda tem o valor de antes.
+    private func followDeviceVolume(_ snapshot: Snapshot) {
+        guard let scalar = snapshot.volumeScalar,
+              snapshot.state == .playing || snapshot.state == .paused,
+              !volumeEditing,
+              !escrevendoVolume,
+              volumeDesejado == nil,
+              transportCommandsInFlight == 0
+        else { return }
+        // A mesma tolerância da confirmação de escrita do engine: abaixo dela é o volume que
+        // nós mesmos pedimos, só que ida e volta por `Float`.
+        let device = Double(scalar)
+        if abs(device - volume) > 0.005 {
+            volume = device
         }
     }
 

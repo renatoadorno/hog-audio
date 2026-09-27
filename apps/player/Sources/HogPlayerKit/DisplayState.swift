@@ -3,14 +3,14 @@ import HogAudioBindings
 
 /// O que a tela mostra — distinto de `Snapshot`, que é o estado do engine. `Snapshot` fala a
 /// língua do motor de áudio; `DisplayState` já vem traduzido para o que a interface renderiza.
+///
+/// O relógio fica de fora, em `ClockState`: ele muda a cada tique enquanto toca, e quem lê o
+/// resto da tela (capa, título, botões) não pode ser recalculado junto.
 public struct DisplayState: Equatable, Sendable {
     public let title: String
     public let artist: String
     public let album: String
     public let artwork: Data?
-    public let elapsed: String
-    public let total: String
-    public let progress: Double
     public let canPlay: Bool
     public let canPause: Bool
     public let canGoNext: Bool
@@ -47,21 +47,11 @@ public func displayState(
         tecnica = partes.joined(separator: " · ")
     }
 
-    let progresso: Double
-    if snapshot.totalSeconds > 0 {
-        progresso = min(1.0, max(0.0, snapshot.elapsedSeconds / snapshot.totalSeconds))
-    } else {
-        progresso = 0
-    }
-
     return DisplayState(
         title: metadata?.title ?? "nenhuma faixa carregada",
         artist: metadata?.artist ?? "",
         album: metadata?.album ?? "",
         artwork: metadata?.artwork,
-        elapsed: formatTime(snapshot.elapsedSeconds),
-        total: formatTime(snapshot.totalSeconds),
-        progress: progresso,
         canPlay: [.loaded, .paused, .finished].contains(snapshot.state),
         canPause: tocando,
         canGoNext: snapshot.currentIndex.map { $0 + 1 < snapshot.queueLen } ?? false,
@@ -70,5 +60,26 @@ public func displayState(
         } ?? false,
         isPlaying: tocando,
         technicalLine: tecnica
+    )
+}
+
+/// O relógio da faixa atual: tempo decorrido, duração e a fração tocada.
+public struct ClockState: Equatable, Sendable {
+    public let elapsed: String
+    public let total: String
+    public let progress: Double
+}
+
+public func clockState(snapshot: Snapshot) -> ClockState {
+    let progresso: Double
+    if snapshot.totalSeconds > 0 {
+        progresso = min(1.0, max(0.0, snapshot.elapsedSeconds / snapshot.totalSeconds))
+    } else {
+        progresso = 0
+    }
+    return ClockState(
+        elapsed: formatTime(snapshot.elapsedSeconds),
+        total: formatTime(snapshot.totalSeconds),
+        progress: progresso
     )
 }

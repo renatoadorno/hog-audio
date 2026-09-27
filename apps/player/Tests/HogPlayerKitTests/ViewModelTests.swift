@@ -18,7 +18,8 @@ final class FakePlayer: HogPlayerProtocol, @unchecked Sendable {
     // Volume que o device "de verdade" tem — o que `snapshot()` devolve. Só diverge de
     // `volumeAplicado` quando `falhaAoAplicarVolume` está setado, simulando uma recusa do
     // hardware.
-    var volumeReal: Float = 0.5
+    var volumeReal: Float? = 0.5
+    var mudo = false
     var falhaAoAplicarVolume: Error?
     // Simulam o `load` bloqueante do lado Rust (`stop_and_release` pode levar até 2 s) para
     // testes de corrida. O atraso é amarrado ao `path` pedido, não a quando o teste o seta —
@@ -42,14 +43,35 @@ final class FakePlayer: HogPlayerProtocol, @unchecked Sendable {
     var avancos = 0
     var atrasoDeAvanco: TimeInterval = 0
     var atrasoDeSelecao: TimeInterval = 0
+    // O relógio da faixa: é o que avança a cada tique do poll enquanto toca.
+    var decorrido: Double = 0
+    // A perda do device: o snapshot levanta a suspeita e o `recover` confirma, como no engine.
+    var suspeitaDeDevice = false
+    var seqProblema: UInt64 = 0
+    var problema: String?
+    var recuperacoes = 0
+    // O aviso que o engine publica no fim de um Play, e um portão que segura o `play()` depois
+    // de publicá-lo — é o que reproduz um tique do poll exibindo o aviso antes de o comando
+    // voltar.
+    var avisoAoTocar: String?
+    var portaoDoPlay: DispatchSemaphore?
 
     private func track() -> TrackFormat {
         TrackFormat(sampleRate: 44100, bitDepth: 16, channels: 2,
                     codec: "flac", deviceName: "Fake", totalSeconds: 10)
     }
+    /// Como no engine, cada entrada nova ganha um id acima de todos os que já existem.
+    private func novoItem(_ path: String) -> QueueItem {
+        QueueItem(id: (itens.map(\.id).max() ?? 0) + 1, path: path, failure: nil)
+    }
+    /// Acrescenta sem mexer na versão da fila: o teste decide quando o model deve reler.
+    func acrescentar(_ path: String) {
+        lock.lock(); defer { lock.unlock() }
+        itens.append(novoItem(path))
+    }
     func appendTracks(paths: [String]) -> UInt32 {
         lock.lock(); defer { lock.unlock() }
-        itens.append(contentsOf: paths.map { QueueItem(path: $0, failure: nil) })
+        for path in paths { itens.append(novoItem(path)) }
         if indiceAtual == nil, !itens.isEmpty { indiceAtual = 0; estado = .loaded }
         if !paths.isEmpty { versaoFila += 1 }
         return UInt32(paths.count)
@@ -91,26 +113,51 @@ final class FakePlayer: HogPlayerProtocol, @unchecked Sendable {
         indiceAtual = current + 1; estado = .playing
         return track()
     }
-    func removeTrack(index: UInt32) throws {
+    func selectTrackId(id: UInt64) throws -> TrackFormat {
+        let index: Int? = {
+            lock.lock(); defer { lock.unlock() }
+            return itens.firstIndex { $0.id == id }
+        }()
+        guard let index else { throw PlayerError.State(message: "a faixa não está mais na fila") }
+        return try selectTrack(index: UInt32(index))
+    }
+    /// Como o engine: removida a faixa atual, quem assume a posição é carregado aqui mesmo e
+    /// o formato dela volta na resposta.
+    func removeTrackId(id: UInt64) throws -> TrackFormat? {
         lock.lock(); defer { lock.unlock() }
-        guard Int(index) < itens.count else { throw PlayerError.State(message: "índice inválido") }
-        let currentBefore = indiceAtual
-        itens.remove(at: Int(index)); versaoFila += 1
-        if currentBefore == index {
-            indiceAtual = Int(index) < itens.count ? index : nil
-            if indiceAtual == nil { estado = .idle }
-        } else if let currentBefore, index < currentBefore {
-            indiceAtual = currentBefore - 1
+        guard let index = itens.firstIndex(where: { $0.id == id }) else {
+            throw PlayerError.State(message: "a faixa não está mais na fila")
         }
-        if itens.isEmpty { indiceAtual = nil; estado = .idle }
+        chamadas.append("remove")
+        let currentBefore = indiceAtual.map(Int.init)
+        itens.remove(at: index); versaoFila += 1
+        if currentBefore == index {
+            guard index < itens.count else {
+                indiceAtual = nil; estado = .idle
+                return nil
+            }
+            indiceAtual = UInt32(index)
+            return track()
+        }
+        if let currentBefore, index < currentBefore {
+            indiceAtual = UInt32(currentBefore - 1)
+        }
+        return nil
     }
     func clearQueue() {
         lock.lock(); defer { lock.unlock() }
         itens.removeAll(); indiceAtual = nil; estado = .idle; versaoFila += 1
     }
     func play() throws {
-        lock.lock(); defer { lock.unlock() }
+        lock.lock()
         chamadas.append("play"); estado = .playing
+        if let aviso = avisoAoTocar {
+            problema = aviso
+            seqProblema += 1
+        }
+        let portao = portaoDoPlay
+        lock.unlock()
+        portao?.wait()
     }
     func pause() throws {
         lock.lock(); defer { lock.unlock() }
@@ -128,10 +175,26 @@ final class FakePlayer: HogPlayerProtocol, @unchecked Sendable {
     }
     func snapshot() -> Snapshot {
         lock.lock(); defer { lock.unlock() }
-        return Snapshot(state: estado, elapsedSeconds: 0, totalSeconds: 10,
-                         underruns: 0, volumeScalar: volumeReal,
+        return Snapshot(state: estado, elapsedSeconds: decorrido, totalSeconds: 10,
+                         underruns: 0, volumeScalar: volumeReal, muted: mudo,
                          currentIndex: indiceAtual, queueLen: UInt32(itens.count),
-                         queueVersion: versaoFila)
+                         queueVersion: versaoFila, deviceSuspect: suspeitaDeDevice,
+                         problemSeq: seqProblema)
+    }
+    func recover() throws -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        chamadas.append("recover")
+        recuperacoes += 1
+        guard suspeitaDeDevice else { return false }
+        suspeitaDeDevice = false
+        estado = .loaded
+        problema = "o device de saída foi desconectado; a reprodução parou"
+        seqProblema += 1
+        return true
+    }
+    func lastProblem() -> String? {
+        lock.lock(); defer { lock.unlock() }
+        return problema
     }
     func shutdown() {
         lock.lock(); defer { lock.unlock() }
@@ -162,6 +225,11 @@ final class FakePlayer: HogPlayerProtocol, @unchecked Sendable {
         TransitionTimings(openMs: 0, releaseMs: 0, reopenMs: 0, acquireMs: 0,
                           volumeMs: 0, prefillMs: 0, startMs: 0)
     }
+}
+
+/// Entradas com ids sequenciais a partir de 1, como o engine dá a uma fila nova.
+func itens(_ paths: [String]) -> [QueueItem] {
+    paths.enumerated().map { QueueItem(id: UInt64($0.offset + 1), path: $0.element, failure: nil) }
 }
 
 @Test @MainActor func oBotaoTocaQuandoParadoEPausaQuandoTocando() async {
@@ -302,12 +370,12 @@ final class FakePlayer: HogPlayerProtocol, @unchecked Sendable {
     // Comparado ao `Float` original, não ao literal `0.82`: a conversão Float → Double não
     // preserva os mesmos bits, e uma igualdade contra o literal reprovaria por
     // arredondamento, não pela ausência da sincronização que o teste quer provar.
-    #expect(model.volume == Double(fake.volumeReal))
+    #expect(fake.volumeReal.map(Double.init) == model.volume)
 }
 
 @Test @MainActor func aFilaSoERelidaQuandoAVersaoMuda() {
     let fake = FakePlayer()
-    fake.itens = [QueueItem(path: "/tmp/a.flac", failure: nil)]
+    fake.itens = itens(["/tmp/a.flac"])
     fake.indiceAtual = 0
     fake.versaoFila = 1
     fake.estado = .loaded
@@ -317,7 +385,7 @@ final class FakePlayer: HogPlayerProtocol, @unchecked Sendable {
     model.refresh()
     #expect(fake.leiturasDaFila == 1)
 
-    fake.itens.append(QueueItem(path: "/tmp/b.flac", failure: nil))
+    fake.acrescentar("/tmp/b.flac")
     fake.versaoFila = 2
     model.refresh()
     #expect(fake.leiturasDaFila == 2)
@@ -326,10 +394,7 @@ final class FakePlayer: HogPlayerProtocol, @unchecked Sendable {
 
 @Test @MainActor func finishedDisparaUmUnicoAvancoEnquantoACargaCorre() async {
     let fake = FakePlayer()
-    fake.itens = [
-        QueueItem(path: "/tmp/a.flac", failure: nil),
-        QueueItem(path: "/tmp/b.flac", failure: nil),
-    ]
+    fake.itens = itens(["/tmp/a.flac", "/tmp/b.flac"])
     fake.indiceAtual = 0
     fake.versaoFila = 1
     fake.estado = .finished
@@ -347,11 +412,7 @@ final class FakePlayer: HogPlayerProtocol, @unchecked Sendable {
 
 @Test @MainActor func nextManualPendenteImpedeAutoAvancoDoMesmoFinished() async {
     let fake = FakePlayer()
-    fake.itens = [
-        QueueItem(path: "/tmp/a.flac", failure: nil),
-        QueueItem(path: "/tmp/b.flac", failure: nil),
-        QueueItem(path: "/tmp/c.flac", failure: nil),
-    ]
+    fake.itens = itens(["/tmp/a.flac", "/tmp/b.flac", "/tmp/c.flac"])
     fake.indiceAtual = 0
     fake.versaoFila = 1
     fake.estado = .finished
@@ -368,17 +429,14 @@ final class FakePlayer: HogPlayerProtocol, @unchecked Sendable {
 
 @Test @MainActor func selecaoEPlayPreservamAOrdemDeChegada() async {
     let fake = FakePlayer()
-    fake.itens = [
-        QueueItem(path: "/tmp/a.flac", failure: nil),
-        QueueItem(path: "/tmp/b.flac", failure: nil),
-    ]
+    fake.itens = itens(["/tmp/a.flac", "/tmp/b.flac"])
     fake.indiceAtual = 0
     fake.versaoFila = 1
     fake.estado = .loaded
     fake.atrasoDeSelecao = 0.1
     let model = PlayerViewModel(player: fake)
 
-    model.selectTrack(index: 1)
+    model.selectTrack(id: 2)
     model.toggle()
     await model.pendingCommand?.value
 
@@ -389,16 +447,13 @@ final class FakePlayer: HogPlayerProtocol, @unchecked Sendable {
 
 @Test @MainActor func shutdownCancelaTransporteQueAindaNaoChegouAoRust() async {
     let fake = FakePlayer()
-    fake.itens = [
-        QueueItem(path: "/tmp/a.flac", failure: nil),
-        QueueItem(path: "/tmp/b.flac", failure: nil),
-    ]
+    fake.itens = itens(["/tmp/a.flac", "/tmp/b.flac"])
     fake.indiceAtual = 0
     fake.versaoFila = 1
     fake.estado = .loaded
     let model = PlayerViewModel(player: fake)
 
-    model.selectTrack(index: 1)
+    model.selectTrack(id: 2)
     let selection = model.pendingCommand
     model.shutdown()
     await selection?.value
@@ -410,18 +465,15 @@ final class FakePlayer: HogPlayerProtocol, @unchecked Sendable {
 
 @Test @MainActor func remocaoClassificaFaixaAtualDepoisDaSelecaoPendente() async {
     let fake = FakePlayer()
-    fake.itens = [
-        QueueItem(path: "/tmp/a.flac", failure: nil),
-        QueueItem(path: "/tmp/b.flac", failure: nil),
-    ]
+    fake.itens = itens(["/tmp/a.flac", "/tmp/b.flac"])
     fake.indiceAtual = 0
     fake.versaoFila = 1
     fake.estado = .loaded
     fake.atrasoDeSelecao = 0.1
     let model = PlayerViewModel(player: fake)
 
-    model.selectTrack(index: 1)
-    model.removeTrack(index: 1)
+    model.selectTrack(id: 2)
+    model.removeTrack(id: 2)
     await model.pendingCommand?.value
 
     #expect(model.currentIndex == nil)
@@ -429,9 +481,240 @@ final class FakePlayer: HogPlayerProtocol, @unchecked Sendable {
     #expect(model.queue.map(\.path) == ["/tmp/a.flac"])
 }
 
+@Test @MainActor func duasRemocoesSeguidasApagamAsFaixasCertas() async {
+    let fake = FakePlayer()
+    fake.itens = itens(["/tmp/a.flac", "/tmp/b.flac", "/tmp/c.flac"])
+    fake.indiceAtual = 0
+    fake.versaoFila = 1
+    fake.estado = .loaded
+    let model = PlayerViewModel(player: fake)
+
+    // Dois Delete antes de o poll reler a fila: com índices, o segundo pedido chegaria com a
+    // posição que a linha tinha antes da primeira remoção.
+    model.removeTrack(id: 2)
+    model.removeTrack(id: 3)
+    await model.pendingCommand?.value
+
+    #expect(fake.itens.map(\.path) == ["/tmp/a.flac"])
+    #expect(model.errorMessage == nil)
+}
+
+@Test @MainActor func removerAFaixaAtualNaoCarregaDeNovoQuemAssumiu() async {
+    let fake = FakePlayer()
+    fake.itens = itens(["/tmp/a.flac", "/tmp/b.flac", "/tmp/c.flac"])
+    fake.indiceAtual = 0
+    fake.versaoFila = 1
+    fake.estado = .playing
+    let model = PlayerViewModel(player: fake)
+
+    model.removeTrack(id: 1)
+    await model.pendingCommand?.value
+
+    // O engine já carregou quem assumiu; carregar de novo soltaria e tomaria o device outra
+    // vez, com um corte no som.
+    #expect(!fake.chamadas.contains("select"))
+    #expect(model.currentIndex == 0)
+    #expect(model.currentItemID == 2)
+    #expect(model.display.technicalLine.contains("44.1 kHz"))
+}
+
+@MainActor
+private func tocandoComVolume(_ volume: Float?) -> (PlayerViewModel, FakePlayer) {
+    let fake = FakePlayer()
+    fake.itens = itens(["/tmp/a.flac", "/tmp/b.flac"])
+    fake.indiceAtual = 0
+    fake.versaoFila = 1
+    fake.estado = .playing
+    fake.volumeReal = volume
+    let model = PlayerViewModel(player: fake)
+    model.refresh()
+    return (model, fake)
+}
+
+@Test @MainActor func oSliderSegueOVolumeMudadoPorFora() {
+    let (model, fake) = tocandoComVolume(0.5)
+
+    fake.volumeReal = 0.25
+    model.refresh()
+
+    #expect(model.volume == 0.25)
+}
+
+@Test @MainActor func oSliderNaoSegueOVolumeForaDeTocarOuPausar() {
+    let (model, fake) = tocandoComVolume(0.5)
+    fake.estado = .loaded
+
+    fake.volumeReal = 0.25
+    model.refresh()
+
+    #expect(model.volume == 0.5)
+}
+
+@Test @MainActor func oSliderNaoPiscaNaTrocaDeFaixa() async {
+    let (model, fake) = tocandoComVolume(0.5)
+    fake.atrasoDeSelecao = 0.1
+
+    // Enquanto a troca corre, o device pode relatar o volume de antes da aquisição.
+    model.selectTrack(id: 2)
+    fake.volumeReal = 0.9
+    model.refresh()
+    #expect(model.volume == 0.5)
+
+    fake.volumeReal = 0.5
+    await model.pendingCommand?.value
+}
+
+@Test @MainActor func oSliderNaoSobrescreveUmArrasto() {
+    let (model, fake) = tocandoComVolume(0.5)
+
+    model.setVolumeEditing(true)
+    fake.volumeReal = 0.25
+    model.refresh()
+    #expect(model.volume == 0.5)
+
+    model.setVolumeEditing(false)
+    model.refresh()
+    #expect(model.volume == 0.25)
+}
+
+@Test @MainActor func oSliderNaoVoltaEnquantoAEscritaNaoChegouAoDevice() async {
+    let (model, fake) = tocandoComVolume(0.5)
+    fake.escalarComAtraso = 0.25
+    fake.atrasoDeVolume = 0.15
+
+    model.applyVolume(0.25)
+    let escrita = model.pendingCommand
+    model.refresh()
+    #expect(model.volume == 0.25)
+
+    await escrita?.value
+}
+
+@Test @MainActor func deviceSemControleDeVolumeNaoMexeNoSlider() {
+    let (model, fake) = tocandoComVolume(0.5)
+
+    fake.volumeReal = nil
+    model.refresh()
+
+    #expect(model.volume == 0.5)
+}
+
+@Test @MainActor func volumeIgualAoDoDeviceNaoArredondaOSlider() async {
+    let (model, _) = tocandoComVolume(0.5)
+
+    // 0.35 em `Float` e de volta em `Double` vira 0.3499999…: o slider mostraria 34%.
+    model.applyVolume(0.35)
+    await model.pendingCommand?.value
+    model.refresh()
+
+    #expect(model.volume == 0.35)
+}
+
+@Test @MainActor func oMudoDoDeviceApareceNaTela() {
+    let (model, fake) = tocandoComVolume(0.5)
+
+    fake.mudo = true
+    model.refresh()
+
+    #expect(model.muted)
+}
+
+@Test @MainActor func problemaDoDeviceApareceUmaVezSo() async {
+    let fake = FakePlayer()
+    fake.itens = itens(["/tmp/a.flac"])
+    fake.indiceAtual = 0
+    fake.estado = .playing
+    let model = PlayerViewModel(player: fake)
+
+    fake.problema = "o device sumiu"
+    fake.seqProblema = 1
+    model.refresh()
+    #expect(model.errorMessage == "o device sumiu")
+
+    // Um comando bem-sucedido limpa a mensagem; o mesmo problema não pode voltar no tique
+    // seguinte.
+    model.applyVolume(0.3)
+    await model.pendingCommand?.value
+    #expect(model.errorMessage == nil)
+    model.refresh()
+    #expect(model.errorMessage == nil)
+}
+
+@Test @MainActor func avisoPublicadoNoPlayNaoSomeQuandoOPlayTermina() async {
+    let fake = FakePlayer()
+    fake.itens = itens(["/tmp/a.flac"])
+    fake.indiceAtual = 0
+    fake.estado = .loaded
+    fake.avisoAoTocar = "o volume voltou ao teto"
+    let portao = DispatchSemaphore(value: 0)
+    fake.portaoDoPlay = portao
+    let model = PlayerViewModel(player: fake)
+    model.refresh()
+
+    model.toggle()
+    let limite = ContinuousClock.now + .seconds(2)
+    while fake.snapshot().problemSeq == 0, ContinuousClock.now < limite {
+        try? await Task.sleep(for: .milliseconds(1))
+    }
+    // O tique do poll mostra o aviso enquanto o Play ainda não voltou.
+    model.refresh()
+    #expect(model.errorMessage == "o volume voltou ao teto")
+
+    portao.signal()
+    await model.pendingCommand?.value
+    #expect(model.errorMessage == "o volume voltou ao teto")
+}
+
+@Test @MainActor func problemaDeAntesDeAbrirNaoAparece() {
+    let fake = FakePlayer()
+    fake.problema = "de uma sessão anterior"
+    fake.seqProblema = 3
+    let model = PlayerViewModel(player: fake)
+
+    model.refresh()
+
+    #expect(model.errorMessage == nil)
+}
+
+@Test @MainActor func deviceSuspeitoNoFimDaFaixaRecuperaENaoAvanca() async {
+    let fake = FakePlayer()
+    fake.itens = itens(["/tmp/a.flac", "/tmp/b.flac"])
+    fake.indiceAtual = 0
+    fake.versaoFila = 1
+    fake.estado = .finished
+    fake.suspeitaDeDevice = true
+    let model = PlayerViewModel(player: fake)
+
+    model.refresh()
+    await model.pendingCommand?.value
+    model.refresh()
+
+    // O auto-avanço tocaria sozinho no device que o macOS escolhesse no lugar do perdido.
+    #expect(fake.recuperacoes == 1)
+    #expect(fake.avancos == 0)
+    #expect(fake.estado == .loaded)
+    #expect(model.errorMessage?.contains("desconectado") == true)
+}
+
+@Test @MainActor func suspeitaRepetidaNoPollNaoEnfileiraOutraRecuperacao() async {
+    let fake = FakePlayer()
+    fake.itens = itens(["/tmp/a.flac"])
+    fake.indiceAtual = 0
+    fake.estado = .playing
+    fake.suspeitaDeDevice = true
+    let model = PlayerViewModel(player: fake)
+
+    model.refresh()
+    model.refresh()
+    model.refresh()
+    await model.pendingCommand?.value
+
+    #expect(fake.recuperacoes == 1)
+}
+
 @Test @MainActor func doisTogglesRapidosTocamEDepoisPausam() async {
     let fake = FakePlayer()
-    fake.itens = [QueueItem(path: "/tmp/a.flac", failure: nil)]
+    fake.itens = itens(["/tmp/a.flac"])
     fake.indiceAtual = 0
     fake.versaoFila = 1
     fake.estado = .loaded

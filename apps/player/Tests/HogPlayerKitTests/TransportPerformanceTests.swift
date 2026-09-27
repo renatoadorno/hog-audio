@@ -1,4 +1,3 @@
-import Combine
 import Foundation
 import HogAudioBindings
 @testable import HogPlayerKit
@@ -57,7 +56,7 @@ private func fila(
     metadataLoader: @escaping @Sendable (URL) async -> TrackMetadata
 ) -> (PlayerViewModel, FakePlayer) {
     let fake = FakePlayer()
-    fake.itens = (0..<quantas).map { QueueItem(path: "/tmp/\($0).flac", failure: nil) }
+    fake.itens = itens((0..<quantas).map { "/tmp/\($0).flac" })
     fake.indiceAtual = 0
     fake.estado = .loaded
     fake.versaoFila = 1
@@ -165,24 +164,9 @@ private func fila(
     #expect(model.currentIndex == 0)
 }
 
-@Test @MainActor func refreshSemMudancaNaoRepublicaATela() async {
-    let (model, _) = fila(3) { metadados($0) }
-    await model.entryLoading?.value
-    model.refresh()
-
-    final class Contador { var mudancas = 0 }
-    let contador = Contador()
-    let assinatura = model.objectWillChange.sink { _ in contador.mudancas += 1 }
-    model.refresh()
-    model.refresh()
-
-    #expect(contador.mudancas == 0)
-    assinatura.cancel()
-}
-
 @Test @MainActor func filaOcupadaNaoBloqueiaEEReliDepois() {
     let (model, fake) = fila(3) { metadados($0) }
-    fake.itens.append(QueueItem(path: "/tmp/nova.flac", failure: nil))
+    fake.acrescentar("/tmp/nova.flac")
     fake.versaoFila += 1
 
     fake.filaOcupada = true
