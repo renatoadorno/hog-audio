@@ -2,6 +2,7 @@
 //! controlador que porta as regras do `PlayerViewModel.swift`. Nada aqui depende de GPUI.
 
 pub mod audio_files;
+pub mod controller;
 pub mod display;
 pub mod entry;
 pub mod format;

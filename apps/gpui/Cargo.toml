@@ -3,7 +3,7 @@
 # docs/superpowers/specs/2026-09-27-prototipo-gpui-design.md
 [workspace]
 resolver = "3"
-members = ["model", "app"]
+members = ["model", "app", "testing"]
 
 [workspace.package]
 version = "0.1.0"

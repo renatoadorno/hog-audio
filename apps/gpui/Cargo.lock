@@ -2572,8 +2572,17 @@ name = "hog-player-model"
 version = "0.1.0"
 dependencies = [
  "hog-audio",
+ "hog-player-testing",
  "image",
  "lofty",
+]
+
+[[package]]
+name = "hog-player-testing"
+version = "0.1.0"
+dependencies = [
+ "hog-audio",
+ "hog-player-model",
 ]
 
 [[package]]

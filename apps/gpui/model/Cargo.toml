@@ -8,3 +8,6 @@ publish.workspace = true
 hog-audio.workspace = true
 image.workspace = true
 lofty.workspace = true
+
+[dev-dependencies]
+hog-player-testing = { path = "../testing" }
