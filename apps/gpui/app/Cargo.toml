@@ -1,0 +1,19 @@
+[package]
+name = "hog-player-gpui"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "hog-player-gpui"
+path = "src/main.rs"
+
+[dependencies]
+gpui.workspace = true
+gpui_platform.workspace = true
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }

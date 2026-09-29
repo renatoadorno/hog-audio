@@ -129,3 +129,21 @@ run-app: app
 
 clean:
 	@rm -rf rust/target apps/player/.build $(APP_DIR)
+
+# --- Protótipo GPUI (apps/gpui): workspace próprio, com lock e target próprios. ---
+# O gate reprova se o core mudar ou se a árvore do core no protótipo (nome, versão e features) divergir do rust/Cargo.lock, salvo exceções justificadas.
+GPUI_DIR := apps/gpui
+
+.PHONY: gpui gpui-fmt gpui-test gpui-app
+
+gpui:
+	@cd $(GPUI_DIR) && cargo build --locked --release -p hog-player-gpui
+
+gpui-fmt:
+	@cd $(GPUI_DIR) && cargo fmt --all
+
+gpui-test:
+	@$(GPUI_DIR)/tools/check_core_untouched.sh
+	@cd $(GPUI_DIR) && cargo fmt --all --check
+	@cd $(GPUI_DIR) && cargo clippy --locked --workspace --all-targets -- -D warnings
+	@cd $(GPUI_DIR) && cargo test --locked --workspace
