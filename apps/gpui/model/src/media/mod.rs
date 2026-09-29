@@ -1,5 +1,8 @@
 //! Imagens já decodificadas, prontas para a UI enviar à GPU sem trabalho na main thread.
 
+pub mod artwork;
+pub mod tags;
+
 use std::sync::Arc;
 
 /// Pixels em BGRA, a ordem que o `RenderImage` do GPUI envia (conferida na Task 0).
