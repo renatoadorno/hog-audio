@@ -96,6 +96,8 @@ pub struct FakeState {
     /// de publicá-lo: reproduz um tique exibindo o aviso antes de o comando voltar.
     pub aviso_ao_tocar: Option<String>,
     pub portao_do_play: Option<Arc<Gate>>,
+    /// O device recusando o play, como o `PlayerError::Device` do core.
+    pub falha_ao_tocar: Option<String>,
     /// O engine ocupado numa troca de device: `try_queue_items` desiste em vez de esperar.
     pub fila_ocupada: bool,
     pub navegacoes: Vec<i32>,
@@ -133,6 +135,7 @@ impl Default for FakeState {
             recuperacoes: 0,
             aviso_ao_tocar: None,
             portao_do_play: None,
+            falha_ao_tocar: None,
             fila_ocupada: false,
             navegacoes: Vec::new(),
         }
@@ -351,6 +354,9 @@ impl Player for FakePlayer {
         let portao = {
             let mut s = self.lock();
             s.chamadas.push("play".to_string());
+            if let Some(message) = s.falha_ao_tocar.clone() {
+                return Err(PlayerError::Device { message });
+            }
             s.estado = PlayerState::Playing;
             if let Some(aviso) = s.aviso_ao_tocar.clone() {
                 s.problema = Some(aviso);

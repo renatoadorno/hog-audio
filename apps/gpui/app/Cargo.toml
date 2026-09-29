@@ -12,8 +12,14 @@ name = "hog-player-gpui"
 path = "src/main.rs"
 
 [dependencies]
+futures.workspace = true
 gpui.workspace = true
 gpui_platform.workspace = true
+hog-audio.workspace = true
+hog-player-model = { path = "../model" }
+image.workspace = true
+signal-hook.workspace = true
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
+hog-player-testing = { path = "../testing" }
