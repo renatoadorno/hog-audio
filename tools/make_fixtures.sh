@@ -66,6 +66,21 @@ sys.stdout.write(base64.b64encode(bloco).decode("ascii"))
 PYEOF
 }
 
+# $1 = arquivo, $2 = duração esperada em segundos. Uma receita que corta o áudio ainda gera um
+# arquivo com tags e capa, e os testes de metadados passariam sem ver o defeito. O arquivo
+# errado é apagado, para a próxima execução não o pular como "já existe".
+confere_audio() {
+  local destino=$1 esperado=$2 lido
+  lido="$(ffprobe -v error -select_streams a:0 -show_entries stream=duration -of csv=p=0 \
+    "$destino" || true)"
+  if ! awk -v lido="$lido" -v esperado="$esperado" \
+    'BEGIN { exit !(lido + 0 >= esperado - 0.05) }'; then
+    echo "FALHOU: $destino devia ter ${esperado}s de áudio e tem '${lido:-nenhum}'" >&2
+    rm -f "$destino"
+    exit 1
+  fi
+}
+
 # $1 = arquivo, $2 = codec, $3 = com capa (1) ou sem (0)
 com_tags() {
   local nome=$1 codec=$2 capa=$3 destino="$DEST/$1"
@@ -85,10 +100,15 @@ com_tags() {
       -metadata album="Album Teste" \
       -metadata "METADATA_BLOCK_PICTURE=$(bloco_de_capa "$jpeg")" "$destino"
   elif [ "$capa" = "1" ]; then
+    # A capa entra como um JPEG pronto, que é uma imagem só. Um `-frames:v 1` na saída, com o
+    # áudio no mesmo arquivo, encerra a saída inteira ao atingir o limite do vídeo (ffmpeg
+    # 9.0): o M4A saía sem áudio e o MP3 com 26 ms.
+    local jpeg="$TMP/capa_300.jpg"
+    ffmpeg -v error -y -f lavfi -i "color=c=orange:s=300x300:d=1" -frames:v 1 "$jpeg"
     ffmpeg -v error -y \
       -f lavfi -i "sine=frequency=440:duration=2:sample_rate=44100" \
-      -f lavfi -i "color=c=orange:s=300x300:d=1" \
-      -map 0:a -map 1:v -frames:v 1 -c:a "$codec" -c:v mjpeg \
+      -i "$jpeg" \
+      -map 0:a -map 1:v -c:a "$codec" -c:v copy \
       -disposition:v attached_pic ${extra[@]+"${extra[@]}"} \
       -metadata title="Titulo Teste" -metadata artist="Artista Teste" \
       -metadata album="Album Teste" "$destino"
@@ -99,6 +119,7 @@ com_tags() {
       -metadata title="Titulo Teste" -metadata artist="Artista Teste" \
       -metadata album="Album Teste" "$destino"
   fi
+  confere_audio "$destino" 2
   echo "  + $nome (tags$([ "$capa" = 1 ] && echo " + capa"))"
 }
 
