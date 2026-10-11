@@ -7,6 +7,7 @@ pub mod technical;
 pub mod tooltip;
 pub mod track_info;
 pub mod transport;
+pub mod volume;
 
 use gpui::{Context, Entity, Subscription};
 

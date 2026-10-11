@@ -5,7 +5,7 @@ use gpui::{
 
 use super::observe;
 use crate::store::Store;
-use crate::theme::{CAPTION, Palette};
+use crate::theme::{CAPTION, Palette, tabular_digits};
 
 /// Lê só o relógio: é o único trecho da tela que muda a cada tique enquanto toca.
 pub struct ClockView {
@@ -46,6 +46,7 @@ impl Render for ClockView {
             .child(
                 CAPTION
                     .apply(div())
+                    .font_features(tabular_digits())
                     .flex()
                     .justify_between()
                     .text_color(palette.secondary)

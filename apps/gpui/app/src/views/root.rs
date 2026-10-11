@@ -13,6 +13,7 @@ use super::technical::TechnicalView;
 use super::tooltip::tooltip;
 use super::track_info::TrackInfoView;
 use super::transport::TransportView;
+use super::volume::VolumeView;
 use super::{icons, observe};
 use crate::actions::Open;
 use crate::store::Store;
@@ -24,6 +25,7 @@ pub struct RootView {
     track_info: Entity<TrackInfoView>,
     clock: Entity<ClockView>,
     transport: Entity<TransportView>,
+    volume: Entity<VolumeView>,
     technical: Entity<TechnicalView>,
     status: Entity<StatusView>,
     focus: FocusHandle,
@@ -49,6 +51,7 @@ impl RootView {
             track_info: cx.new(|cx| TrackInfoView::new(store.clone(), cx)),
             clock: cx.new(|cx| ClockView::new(store.clone(), cx)),
             transport: cx.new(|cx| TransportView::new(store.clone(), cx)),
+            volume: cx.new(|cx| VolumeView::new(store.clone(), window, cx)),
             technical: cx.new(|cx| TechnicalView::new(store.clone(), cx)),
             status: cx.new(|cx| StatusView::new(store.clone(), cx)),
             store,
@@ -85,9 +88,8 @@ impl RootView {
             )
     }
 
-    /// O volume entra na Task 6.
-    fn volume_slot(&self, cover: f32) -> Div {
-        div().w(px(cover)).h(px(VOLUME_HEIGHT))
+    fn volume_slot(&self, cover: f32) -> impl IntoElement {
+        self.volume.clone().cached(sized(cover, VOLUME_HEIGHT))
     }
 
     /// A fila entra na Task 7.

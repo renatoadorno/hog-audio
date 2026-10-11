@@ -4,14 +4,15 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    AnyView, AppContext, Context, Entity, InteractiveElement, IntoElement, ParentElement, Render,
-    Styled, TestAppContext, Window, div, px,
+    AnyView, AppContext, Bounds, Context, Entity, InteractiveElement, IntoElement, Modifiers,
+    MouseButton, ParentElement, Pixels, Point, Render, StyleRefinement, Styled, TestAppContext,
+    VisualTestContext, Window, div, point, px, size,
 };
 use hog_audio::transitions::PlayerState;
 use hog_player_gpui::actions;
 use hog_player_gpui::store::{Signal, Store, wake_channel};
 use hog_player_gpui::theme::{
-    CLOCK_HEIGHT, STATUS_GAP, STATUS_HEIGHT, TECHNICAL_HEIGHT, TITLE_BLOCK,
+    CLOCK_HEIGHT, STATUS_GAP, STATUS_HEIGHT, TECHNICAL_HEIGHT, TITLE_BLOCK, VOLUME_HEIGHT,
 };
 use hog_player_gpui::views::clock::ClockView;
 use hog_player_gpui::views::cover::CoverView;
@@ -20,6 +21,7 @@ use hog_player_gpui::views::status::StatusView;
 use hog_player_gpui::views::technical::TechnicalView;
 use hog_player_gpui::views::track_info::TrackInfoView;
 use hog_player_gpui::views::transport::TransportView;
+use hog_player_gpui::views::volume::VolumeView;
 use hog_player_model::controller::Config;
 use hog_player_model::entry::QueueEntryInfo;
 use hog_player_model::metadata::TrackMetadata;
@@ -245,19 +247,22 @@ fn observar<V: 'static>(
 /// Cada view redesenha só com o sinal da parte do modelo que ela lê.
 #[gpui::test]
 fn cada_view_observa_so_o_seu_sinal(cx: &mut TestAppContext) {
-    const NOMES: [&str; 7] = [
+    const NOMES: [&str; 8] = [
         "capa",
         "faixa",
         "relogio",
         "transporte",
         "tecnica",
         "aviso",
+        "volume",
         "raiz",
     ];
     let fake = FakePlayer::new();
     let store = store(cx, &fake);
     let contas: Rc<Vec<Cell<u32>>> = Rc::new(NOMES.iter().map(|_| Cell::new(0)).collect());
-    let (raiz, _) = cx.add_window_view(|window, cx| RootView::new(store.clone(), window, cx));
+    let (raiz, janela) = cx.add_window_view(|window, cx| RootView::new(store.clone(), window, cx));
+    let volume =
+        janela.update(|window, cx| cx.new(|cx| VolumeView::new(store.clone(), window, cx)));
     let capa = cx.new(|cx| CoverView::new(store.clone(), cx));
     let faixa = cx.new(|cx| TrackInfoView::new(store.clone(), cx));
     let relogio = cx.new(|cx| ClockView::new(store.clone(), cx));
@@ -270,7 +275,8 @@ fn cada_view_observa_so_o_seu_sinal(cx: &mut TestAppContext) {
     observar(cx, &transporte, &contas, 3);
     observar(cx, &tecnica, &contas, 4);
     observar(cx, &aviso, &contas, 5);
-    observar(cx, &raiz, &contas, 6);
+    observar(cx, &volume, &contas, 6);
+    observar(cx, &raiz, &contas, 7);
 
     let signals = cx.update(|cx| store.read(cx).signals.clone());
     let mut visto = Vec::new();
@@ -302,7 +308,7 @@ fn cada_view_observa_so_o_seu_sinal(cx: &mut TestAppContext) {
             ("clock", vec!["relogio"]),
             ("queue", vec![]),
             ("entries", vec![]),
-            ("volume", vec![]),
+            ("volume", vec!["volume"]),
             ("error", vec!["aviso", "raiz"]),
         ]
     );
@@ -462,7 +468,7 @@ fn cada_texto_da_coluna_cabe_no_seu_slot(cx: &mut TestAppContext) {
     assert!(!model.display.technical_line.is_empty());
     assert!(model.error.is_some());
 
-    let (_, window) = cx.add_window_view(|_, cx| AlturaNatural {
+    let (_, window) = cx.add_window_view(|window, cx| AlturaNatural {
         largura: LARGURA,
         views: vec![
             (
@@ -481,6 +487,11 @@ fn cada_texto_da_coluna_cabe_no_seu_slot(cx: &mut TestAppContext) {
                 "aviso",
                 cx.new(|cx| StatusView::new(store.clone(), cx)).into(),
             ),
+            (
+                "volume",
+                cx.new(|cx| VolumeView::new(store.clone(), window, cx))
+                    .into(),
+            ),
         ],
     });
     window.run_until_parked();
@@ -490,6 +501,7 @@ fn cada_texto_da_coluna_cabe_no_seu_slot(cx: &mut TestAppContext) {
         ("relogio", CLOCK_HEIGHT),
         ("tecnica", TECHNICAL_HEIGHT),
         ("aviso", STATUS_HEIGHT),
+        ("volume", VOLUME_HEIGHT),
     ]
     .into_iter()
     .map(|(nome, slot)| {
@@ -533,4 +545,377 @@ fn a_fila_so_desce_quando_ha_aviso(cx: &mut TestAppContext) {
     let com_aviso = topo(window, "fila") - topo(window, "coluna");
 
     assert_eq!((sem_aviso, com_aviso), (0.0, STATUS_HEIGHT + STATUS_GAP));
+}
+
+#[gpui::test]
+fn o_slider_publica_na_hora_e_notifica_so_o_volume(cx: &mut TestAppContext) {
+    let fake = carregada(PlayerState::Playing);
+    let store = store(cx, &fake);
+    store.update(cx, |s, _| {
+        assert!(s.wait_idle(PRAZO) && s.wait_entries(PRAZO))
+    });
+    store.update(cx, |s, cx| s.tick(cx));
+    let volume = Rc::new(Cell::new(0));
+    let tela = Rc::new(Cell::new(0));
+    cx.update(|cx| {
+        let signals = store.read(cx).signals.clone();
+        for (sinal, conta) in [(&signals.volume, &volume), (&signals.display, &tela)] {
+            let conta = conta.clone();
+            cx.observe(sinal, move |_, _| conta.set(conta.get() + 1))
+                .detach();
+        }
+    });
+
+    store.update(cx, |s, cx| s.apply_volume(0.3, cx));
+
+    assert_eq!(store.read_with(cx, |s, _| s.model().volume.value), 0.3);
+    assert_eq!((volume.get(), tela.get()), (1, 0));
+    store.update(cx, |s, _| assert!(s.wait_idle(PRAZO)));
+    assert_eq!(fake.with(|s| s.volume_aplicado), Some(0.3));
+}
+
+#[gpui::test]
+fn o_passo_do_volume_nao_passa_dos_limites(cx: &mut TestAppContext) {
+    let fake = carregada(PlayerState::Playing);
+    let store = store(cx, &fake);
+
+    store.update(cx, |s, cx| {
+        s.apply_volume(0.98, cx);
+        s.nudge_volume(0.05, cx);
+    });
+    assert_eq!(store.read_with(cx, |s, _| s.model().volume.value), 1.0);
+
+    store.update(cx, |s, cx| s.nudge_volume(-2.0, cx));
+    assert_eq!(store.read_with(cx, |s, _| s.model().volume.value), 0.0);
+    store.update(cx, |s, _| assert!(s.wait_idle(PRAZO)));
+}
+
+/// O trilho útil, medido no layout: o trilho menos o raio do botão em cada ponta. É o caminho do
+/// centro do botão, de 0 a 1. Só existe no quadro em que a `VolumeView` redesenhou: o prepaint
+/// reaproveitado de uma view em cache não repõe o `debug_bounds`.
+fn trilho_util(window: &mut VisualTestContext) -> Bounds<Pixels> {
+    let trilho = window.debug_bounds("trilho-volume").expect("trilho-volume");
+    let raio = window
+        .debug_bounds("botao-volume")
+        .expect("botao-volume")
+        .size
+        .width
+        / 2.0;
+    let util = Bounds {
+        origin: point(trilho.left() + raio, trilho.top()),
+        size: size(trilho.size.width - raio * 2.0, trilho.size.height),
+    };
+    assert!(
+        f32::from(util.size.width) > 0.0,
+        "trilho sem largura: {trilho:?}"
+    );
+    util
+}
+
+/// A raiz inteira numa janela de teste, tocando, e o trilho útil do volume.
+fn volume_na_janela(
+    cx: &mut TestAppContext,
+) -> (
+    Arc<FakePlayer>,
+    Entity<Store>,
+    &mut VisualTestContext,
+    Bounds<Pixels>,
+) {
+    let (fake, store) = assentada(cx, PlayerState::Playing);
+    let (_root, window) = cx.add_window_view(|window, cx| RootView::new(store.clone(), window, cx));
+    window.run_until_parked();
+    let trilho = trilho_util(window);
+    (fake, store, window, trilho)
+}
+
+fn no_trilho(trilho: Bounds<Pixels>, fracao: f32) -> Point<Pixels> {
+    point(
+        trilho.left() + trilho.size.width * fracao,
+        trilho.center().y,
+    )
+}
+
+fn apertar(window: &mut VisualTestContext, onde: Point<Pixels>) {
+    window.simulate_mouse_down(onde, MouseButton::Left, Modifiers::none());
+}
+
+/// Com o botão apertado.
+fn arrastar(window: &mut VisualTestContext, onde: Point<Pixels>) {
+    window.simulate_mouse_move(onde, MouseButton::Left, Modifiers::none());
+}
+
+fn soltar(window: &mut VisualTestContext, onde: Point<Pixels>) {
+    window.simulate_mouse_up(onde, MouseButton::Left, Modifiers::none());
+}
+
+fn volume(window: &mut VisualTestContext, store: &Entity<Store>) -> f64 {
+    store.read_with(window, |s, _| s.model().volume.value)
+}
+
+/// Três casas bastam: o valor sai de uma divisão em `f32` sobre a posição em pixels.
+fn casas(valor: f64) -> f64 {
+    (valor * 1000.0).round() / 1000.0
+}
+
+/// O `editing` não aparece no modelo; aparece no controlador ignorando o volume mudado por fora
+/// enquanto a mão está no slider (`follow_device_volume`). Devolve se o slider seguiu o device.
+fn segue_o_device(
+    window: &mut VisualTestContext,
+    fake: &FakePlayer,
+    store: &Entity<Store>,
+) -> bool {
+    const DE_FORA: f32 = 0.125;
+    store.update(window, |s, _| assert!(s.wait_idle(PRAZO)));
+    fake.with(|s| s.volume_real = Some(DE_FORA));
+    store.update(window, |s, cx| s.tick(cx));
+    volume(window, store) == f64::from(DE_FORA)
+}
+
+#[gpui::test]
+fn apertar_no_trilho_leva_o_volume_ao_ponto_e_liga_a_edicao(cx: &mut TestAppContext) {
+    let (fake, store, window, trilho) = volume_na_janela(cx);
+
+    apertar(window, no_trilho(trilho, 0.3));
+
+    assert_eq!(casas(volume(window, &store)), 0.3);
+    assert!(
+        !segue_o_device(window, &fake, &store),
+        "o volume de fora moveu o slider com a mão nele"
+    );
+}
+
+#[gpui::test]
+fn arrastar_faz_o_volume_acompanhar_e_notifica_so_o_volume(cx: &mut TestAppContext) {
+    let (_fake, store, window, trilho) = volume_na_janela(cx);
+    apertar(window, no_trilho(trilho, 0.2));
+    let n = contar_sinais(window, &store);
+
+    let mut vistos = Vec::new();
+    for fracao in [0.6, 0.8, 0.4] {
+        arrastar(window, no_trilho(trilho, fracao));
+        vistos.push(casas(volume(window, &store)));
+    }
+
+    assert_eq!(vistos, vec![0.6, 0.8, 0.4]);
+    assert_eq!((n.volume.get(), n.tela.get()), (3, 0));
+}
+
+#[gpui::test]
+fn soltar_o_botao_desliga_a_edicao(cx: &mut TestAppContext) {
+    let (fake, store, window, trilho) = volume_na_janela(cx);
+    apertar(window, no_trilho(trilho, 0.3));
+    arrastar(window, no_trilho(trilho, 0.6));
+
+    soltar(window, no_trilho(trilho, 0.6));
+
+    assert!(
+        segue_o_device(window, &fake, &store),
+        "o slider continuou em edição depois de soltar"
+    );
+}
+
+#[gpui::test]
+fn soltar_fora_do_trilho_encerra_o_arrasto(cx: &mut TestAppContext) {
+    let (fake, store, window, trilho) = volume_na_janela(cx);
+    let fora = point(no_trilho(trilho, 0.7).x, trilho.bottom() + px(100.0));
+    assert!(!trilho.contains(&fora));
+    apertar(window, no_trilho(trilho, 0.3));
+    arrastar(window, fora);
+    assert_eq!(casas(volume(window, &store)), 0.7);
+
+    soltar(window, fora);
+    window.simulate_mouse_move(no_trilho(trilho, 0.9), None, Modifiers::none());
+
+    assert_eq!(casas(volume(window, &store)), 0.7);
+    assert!(
+        segue_o_device(window, &fake, &store),
+        "o slider continuou em edição depois de soltar fora do trilho"
+    );
+}
+
+#[gpui::test]
+fn arrastar_alem_das_pontas_fica_em_zero_e_em_um(cx: &mut TestAppContext) {
+    let (_fake, store, window, trilho) = volume_na_janela(cx);
+    let y = trilho.center().y;
+    apertar(window, no_trilho(trilho, 0.5));
+
+    arrastar(window, point(trilho.left() - px(50.0), y));
+    let esquerda = volume(window, &store);
+    arrastar(window, point(trilho.right() + px(50.0), y));
+    let direita = volume(window, &store);
+
+    assert_eq!((esquerda, direita), (0.0, 1.0));
+}
+
+/// O AppKit pode não entregar o mouse-up (⌘-Tab com o botão apertado). Sem encerrar o arrasto
+/// na desativação, o `editing` ficaria preso e o slider pararia de seguir o device.
+#[gpui::test]
+fn perder_o_foco_no_meio_do_arrasto_encerra_o_arrasto(cx: &mut TestAppContext) {
+    let (fake, store, window, trilho) = volume_na_janela(cx);
+    // A janela de teste nasce inativa, e desativar uma janela inativa não faz nada.
+    window.update(|window, _| window.activate_window());
+    window.run_until_parked();
+    assert!(window.update(|window, _| window.is_window_active()));
+    apertar(window, no_trilho(trilho, 0.3));
+    arrastar(window, no_trilho(trilho, 0.6));
+
+    window.deactivate_window();
+    arrastar(window, no_trilho(trilho, 0.9));
+
+    assert_eq!(casas(volume(window, &store)), 0.6);
+    assert!(
+        segue_o_device(window, &fake, &store),
+        "o slider continuou em edição depois de perder o foco"
+    );
+}
+
+#[gpui::test]
+fn as_pontas_do_trilho_util_dao_zero_e_um(cx: &mut TestAppContext) {
+    let (_fake, store, window, trilho) = volume_na_janela(cx);
+
+    apertar(window, no_trilho(trilho, 0.0));
+    soltar(window, no_trilho(trilho, 0.0));
+    let esquerda = casas(volume(window, &store));
+    apertar(window, no_trilho(trilho, 1.0));
+    soltar(window, no_trilho(trilho, 1.0));
+    let direita = casas(volume(window, &store));
+
+    assert_eq!((esquerda, direita), (0.0, 1.0));
+}
+
+/// Como no NSSlider, o botão fica dentro do trilho: nas pontas, o clique nele cai no trilho e
+/// não o desloca.
+#[gpui::test]
+fn nas_pontas_o_botao_fica_dentro_do_trilho_e_o_clique_nele_nao_o_move(cx: &mut TestAppContext) {
+    let (_fake, store, window, _) = volume_na_janela(cx);
+    let mut vistos = Vec::new();
+
+    for valor in [0.0, 1.0] {
+        store.update(window, |s, cx| s.apply_volume(valor, cx));
+        window.run_until_parked();
+        let trilho = window.debug_bounds("trilho-volume").expect("trilho-volume");
+        let botao = window.debug_bounds("botao-volume").expect("botao-volume");
+        let dentro = botao.left() >= trilho.left() && botao.right() <= trilho.right();
+        apertar(window, botao.center());
+        soltar(window, botao.center());
+        vistos.push((dentro, casas(volume(window, &store))));
+    }
+
+    assert_eq!(vistos, vec![(true, 0.0), (true, 1.0)]);
+}
+
+#[gpui::test]
+fn o_primeiro_movimento_ja_move_o_volume(cx: &mut TestAppContext) {
+    let (_fake, store, window, trilho) = volume_na_janela(cx);
+    apertar(window, no_trilho(trilho, 0.3));
+
+    arrastar(window, no_trilho(trilho, 0.6));
+
+    assert_eq!(casas(volume(window, &store)), 0.6);
+}
+
+/// Com um drag do GPUI aberto, cada movimento do mouse redesenha a janela inteira, sem cache.
+#[gpui::test]
+fn arrastar_o_volume_nao_abre_um_drag_do_gpui(cx: &mut TestAppContext) {
+    let (_fake, _store, window, trilho) = volume_na_janela(cx);
+    apertar(window, no_trilho(trilho, 0.2));
+    arrastar(window, no_trilho(trilho, 0.3));
+
+    arrastar(window, no_trilho(trilho, 0.6));
+
+    assert!(!window.read(|cx| cx.has_active_drag()));
+}
+
+/// Com o botão apertado, o macOS reenvia o último movimento a cada 16 ms: a mão parada não pode
+/// virar uma publicação e uma escrita no device por quadro. O `wait_idle` entre os movimentos
+/// impede o worker de juntar os dois pedidos num só.
+#[gpui::test]
+fn a_mao_parada_no_arrasto_nao_publica_de_novo(cx: &mut TestAppContext) {
+    let (fake, store, window, trilho) = volume_na_janela(cx);
+    apertar(window, no_trilho(trilho, 0.3));
+    store.update(window, |s, _| assert!(s.wait_idle(PRAZO)));
+    let n = contar_sinais(window, &store);
+    let antes = fake.with(|s| s.escritas_de_volume);
+
+    for _ in 0..2 {
+        arrastar(window, no_trilho(trilho, 0.6));
+        store.update(window, |s, _| assert!(s.wait_idle(PRAZO)));
+    }
+
+    let escritas = fake.with(|s| s.escritas_de_volume) - antes;
+    assert_eq!((n.volume.get(), escritas), (1, 1));
+}
+
+/// O movimento é ouvido na janela inteira: só o arrasto que começou no trilho mexe no volume.
+#[gpui::test]
+fn arrastar_comecando_fora_do_trilho_nao_mexe_no_volume(cx: &mut TestAppContext) {
+    let (_fake, store, window, trilho) = volume_na_janela(cx);
+    let fora = point(no_trilho(trilho, 0.3).x, trilho.bottom() + px(100.0));
+    apertar(window, fora);
+
+    arrastar(window, no_trilho(trilho, 0.8));
+
+    assert_eq!(volume(window, &store), 0.5);
+}
+
+/// O mouse-up pode não chegar (o AppKit não o entrega em todo caso): mover com o botão solto
+/// não arrasta.
+#[gpui::test]
+fn mover_com_o_botao_solto_nao_arrasta(cx: &mut TestAppContext) {
+    let (_fake, store, window, trilho) = volume_na_janela(cx);
+    apertar(window, no_trilho(trilho, 0.3));
+
+    window.simulate_mouse_move(no_trilho(trilho, 0.8), None, Modifiers::none());
+
+    assert_eq!(casas(volume(window, &store)), 0.3);
+}
+
+/// Uma view em cache que só conta quantas vezes redesenhou.
+struct ContaRender(Rc<Cell<u32>>);
+
+impl Render for ContaRender {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        self.0.set(self.0.get() + 1);
+        div().size_full()
+    }
+}
+
+/// O volume com uma irmã em cache, como na coluna da raiz.
+struct VolumeComIrma {
+    volume: Entity<VolumeView>,
+    irma: Entity<ContaRender>,
+}
+
+impl Render for VolumeComIrma {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let slot = |altura: f32| StyleRefinement::default().w(px(320.0)).h(px(altura));
+        div()
+            .flex()
+            .flex_col()
+            .child(self.irma.clone().cached(slot(40.0)))
+            .child(self.volume.clone().cached(slot(VOLUME_HEIGHT)))
+    }
+}
+
+#[gpui::test]
+fn arrastar_o_volume_nao_redesenha_a_view_irma_em_cache(cx: &mut TestAppContext) {
+    let (_fake, store) = assentada(cx, PlayerState::Playing);
+    let renders = Rc::new(Cell::new(0));
+    let (_, window) = cx.add_window_view(|window, cx| VolumeComIrma {
+        volume: cx.new(|cx| VolumeView::new(store.clone(), window, cx)),
+        irma: cx.new(|_| ContaRender(renders.clone())),
+    });
+    window.run_until_parked();
+    let trilho = trilho_util(window);
+    apertar(window, no_trilho(trilho, 0.2));
+    arrastar(window, no_trilho(trilho, 0.3));
+    // A troca de modalidade de entrada no primeiro evento do mouse redesenha tudo uma vez.
+    renders.set(0);
+
+    for fracao in [0.6, 0.8, 0.4] {
+        arrastar(window, no_trilho(trilho, fracao));
+    }
+
+    assert_eq!(casas(volume(window, &store)), 0.4);
+    assert_eq!(renders.get(), 0);
 }

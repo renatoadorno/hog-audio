@@ -1,10 +1,17 @@
 //! Tokens de cor, espaço e tipo. As cores seguem as do SwiftUI (`Color.hogAccent` e as cores
 //! semânticas do sistema), para a comparação medir a tecnologia e não um visual diferente.
 
-use gpui::{Rgba, Styled, WindowAppearance, px, rgb, rgba};
+use std::sync::Arc;
+
+use gpui::{FontFeatures, Rgba, Styled, WindowAppearance, px, rgb, rgba};
 
 pub const FONT: &str = ".SystemUIFont";
 pub const MONO_FONT: &str = "Menlo";
+
+/// O `.monospacedDigit()` do SwiftUI: um número que muda (relógio, volume) não muda de largura.
+pub fn tabular_digits() -> FontFeatures {
+    FontFeatures(Arc::new(vec![("tnum".into(), 1)]))
+}
 
 /// Um estilo de texto do macOS, em pt, com a altura de linha dele. Sem altura explícita o GPUI
 /// usa 1,618 × a fonte, e o texto não cabe nos slots medidos no SwiftUI.
