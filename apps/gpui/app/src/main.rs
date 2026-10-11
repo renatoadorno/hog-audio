@@ -24,11 +24,19 @@ fn main() {
         .with_quit_mode(QuitMode::LastWindowClosed)
         .run(move |cx: &mut App| {
             let (wake, woken) = wake_channel();
+            #[cfg(feature = "exp-sem-poll")]
+            let signal_wake = wake.clone();
             let config = Config::production(log.clone(), wake);
             let store = cx.new(|cx| Store::new(player.clone(), config, cx));
             store.update(cx, |store, cx| store.start(woken, cx));
             if let Err(error) = watch_signals(store.read(cx).quit_flag()) {
                 log(&format!("não consegui instalar os sinais: {error}"));
+            }
+            #[cfg(feature = "exp-sem-poll")]
+            if let Err(error) =
+                hog_player_gpui::exit::wake_on_signals(store.read(cx).quit_flag(), signal_wake)
+            {
+                log(&format!("não consegui acordar o Store nos sinais: {error}"));
             }
             shutdown_on_quit(&store, log, cx);
             actions::bind(cx);

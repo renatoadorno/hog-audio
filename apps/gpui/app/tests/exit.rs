@@ -53,6 +53,27 @@ fn sinal_pede_para_sair() {
     assert!(ligou(&quit));
 }
 
+/// `exp-sem-poll`: com o poll dormindo, o sinal acorda o Store, e a saída já está pedida quando o
+/// tique do wake lê o pedido.
+#[cfg(feature = "exp-sem-poll")]
+#[test]
+fn sem_poll_o_sinal_pede_para_sair_e_acorda_o_store() {
+    use hog_player_gpui::exit::wake_on_signals;
+    use hog_player_model::controller::Wake;
+
+    let quit = Arc::new(AtomicBool::new(false));
+    let (acordou, acordado) = mpsc::channel();
+    let pedido = Arc::clone(&quit);
+    let wake: Wake = Arc::new(move || {
+        let _ = acordou.send(pedido.load(Ordering::Acquire));
+    });
+    wake_on_signals(Arc::clone(&quit), wake).expect("sinais");
+
+    raise(SIGHUP).expect("raise");
+
+    assert_eq!(acordado.recv_timeout(PRAZO), Ok(true));
+}
+
 #[test]
 fn o_sighup_nunca_e_emergencia() {
     for depois in [

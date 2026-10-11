@@ -8,6 +8,8 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use futures::channel::mpsc::{UnboundedReceiver, unbounded};
+#[cfg(feature = "exp-sem-poll")]
+use futures::channel::oneshot;
 use gpui::{App, AppContext, Context, Entity, Task};
 use hog_player_model::controller::{Changes, Config, Controller, Model, Wake};
 use hog_player_model::port::Player;
@@ -57,6 +59,9 @@ pub struct Store {
     last_current: Option<u64>,
     quit_requested: Arc<AtomicBool>,
     tasks: Vec<Task<()>>,
+    /// `exp-sem-poll`: com o poll dormindo, o aviso que o acorda.
+    #[cfg(feature = "exp-sem-poll")]
+    resume_poll: Option<oneshot::Sender<()>>,
 }
 
 impl Store {
@@ -68,6 +73,8 @@ impl Store {
             last_current: None,
             quit_requested: Arc::new(AtomicBool::new(false)),
             tasks: Vec::new(),
+            #[cfg(feature = "exp-sem-poll")]
+            resume_poll: None,
         }
     }
 
@@ -76,6 +83,7 @@ impl Store {
     /// diferença fica registrada no resultado.
     pub fn start(&mut self, mut woken: UnboundedReceiver<()>, cx: &mut Context<Self>) {
         const POLL: Duration = Duration::from_millis(100);
+        #[cfg(not(feature = "exp-sem-poll"))]
         self.tasks.push(cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(POLL).await;
@@ -84,6 +92,8 @@ impl Store {
                 }
             }
         }));
+        #[cfg(feature = "exp-sem-poll")]
+        self.start_poll_while_playing(POLL, cx);
         self.tasks.push(cx.spawn(async move |this, cx| {
             while woken.next().await.is_some() {
                 // Várias respostas juntas viram um tique só.
@@ -115,6 +125,8 @@ impl Store {
             },
             cx,
         );
+        #[cfg(feature = "exp-sem-poll")]
+        self.resume_poll_if_playing();
         if self.quit_requested.load(Ordering::Acquire) {
             cx.quit();
         }
@@ -236,5 +248,49 @@ impl Store {
     /// Só para testes: espera as linhas da fila carregarem.
     pub fn wait_entries(&mut self, timeout: Duration) -> bool {
         self.controller.wait_entries(timeout)
+    }
+}
+
+/// Experimento `exp-sem-poll` (branch exp/gpui-parado): mede quanto do custo parado é o poll. O
+/// tique de 10 Hz só roda tocando; parado, pausado ou vazio, o poll dorme até um tique acordado
+/// pelo `wake` do controlador ver a reprodução. Dormindo, ninguém lê o snapshot por conta própria:
+/// device suspeito, problema novo e volume mudado por fora esperam o próximo wake.
+#[cfg(feature = "exp-sem-poll")]
+impl Store {
+    fn start_poll_while_playing(&mut self, poll: Duration, cx: &mut Context<Self>) {
+        self.tasks.push(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(poll).await;
+                // Tique e decisão de dormir no mesmo update: nenhum tique do wake cabe entre os dois.
+                let Ok(parked) = this.update(cx, |store, cx| {
+                    store.tick(cx);
+                    store.park_poll_unless_playing()
+                }) else {
+                    break;
+                };
+                if let Some(resumed) = parked
+                    && resumed.await.is_err()
+                {
+                    break;
+                }
+            }
+        }));
+    }
+
+    fn park_poll_unless_playing(&mut self) -> Option<oneshot::Receiver<()>> {
+        if self.model().queue.is_playing {
+            return None;
+        }
+        let (resume, resumed) = oneshot::channel();
+        self.resume_poll = Some(resume);
+        Some(resumed)
+    }
+
+    fn resume_poll_if_playing(&mut self) {
+        if self.model().queue.is_playing
+            && let Some(resume) = self.resume_poll.take()
+        {
+            let _ = resume.send(());
+        }
     }
 }
