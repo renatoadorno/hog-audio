@@ -105,6 +105,9 @@ pub struct FakeState {
     /// O engine ocupado numa troca de device: `try_queue_items` desiste em vez de esperar.
     pub fila_ocupada: bool,
     pub navegacoes: Vec<i32>,
+    /// Segura o `navigate` depois de registrar os passos em `navegacoes`: a navegação em curso,
+    /// com a próxima ainda esperando a vez.
+    pub portao_da_navegacao: Option<Arc<Gate>>,
 }
 
 impl Default for FakeState {
@@ -144,6 +147,7 @@ impl Default for FakeState {
             falha_ao_tocar: None,
             fila_ocupada: false,
             navegacoes: Vec::new(),
+            portao_da_navegacao: None,
         }
     }
 }
@@ -260,8 +264,15 @@ impl Player for FakePlayer {
     }
 
     fn navigate(&self, steps: i32) -> Result<TrackFormat, PlayerError> {
+        let portao = {
+            let mut s = self.lock();
+            s.navegacoes.push(steps);
+            s.portao_da_navegacao.clone()
+        };
+        if let Some(portao) = portao {
+            portao.wait();
+        }
         let mut s = self.lock();
-        s.navegacoes.push(steps);
         let Some(current) = s.indice_atual.filter(|_| !s.itens.is_empty()) else {
             return Err(state_error("sem faixa"));
         };
