@@ -25,6 +25,20 @@ Os outros dois eliminatórios não reprovaram, com ressalvas:
 Pela regra combinada antes de medir, um eliminatório basta: o GPUI não substitui o SwiftUI.
 Não há ADR a escrever.
 
+**A favor do GPUI no que classifica:**
+- **Visual:** na avaliação do usuário, ao usar os dois, o protótipo ficou "muito mais bonito e
+  clean".
+- **Abertura quente:** 216 ms contra 264 ms.
+- **Memória depois de percorrer a fila:** 82 a 85 MB contra 89 a 93 MB.
+- **Testes:** a UI tem 175 testes em Rust com o `TestAppContext`, inclusive cliques e teclas
+  simulados.
+
+**Contra:**
+- Build 2,3 vezes mais lento e `.app` 7 vezes maior.
+- Mais memória logo depois de carregar a fila (cerca de 40 MB a mais).
+- A acessibilidade exige tirar o cache das views, e no macOS a ativação não desliga.
+- A barra de título só arrasta nos 28 pt de cima.
+
 Os números absolutos são pequenos (1,5% de um núcleo). A causa provável é a do enunciado da
 spec: o display link do GPUI acorda a main thread com a janela visível (a thread `CVDisplayLink`
 aparece viva no `sample`), somado ao poll de 10 Hz sem folga. Minimizado, a diferença quase some
