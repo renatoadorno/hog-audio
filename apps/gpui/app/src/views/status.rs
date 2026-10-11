@@ -1,5 +1,6 @@
 use gpui::{
-    Context, Entity, IntoElement, ParentElement, Render, Styled, Subscription, Window, div, px, svg,
+    Context, Entity, InteractiveElement, IntoElement, ParentElement, Render, Role,
+    StatefulInteractiveElement, Styled, Subscription, Window, div, px, svg,
 };
 
 use super::{icons, observe};
@@ -21,11 +22,15 @@ impl StatusView {
 impl Render for StatusView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = Palette::for_appearance(window.appearance());
+        // Sem papel, o raiz vazio não gera nó: o `id` só iguala o tipo dos dois ramos.
         let Some(message) = self.store.read(cx).model().error.clone() else {
-            return div();
+            return div().id("aviso");
         };
         CAPTION
             .apply(div())
+            .id("aviso")
+            .role(Role::Alert)
+            .aria_label(message.clone())
             .size_full()
             .flex()
             .items_center()

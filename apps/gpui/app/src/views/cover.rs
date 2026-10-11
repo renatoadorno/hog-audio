@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use gpui::{
     Context, Div, Entity, InteractiveElement, IntoElement, ObjectFit, ParentElement, Render,
-    RenderImage, Styled, StyledImage, Subscription, Window, div, img, linear_color_stop,
-    linear_gradient, px, rgb, rgba, svg,
+    RenderImage, Role, StatefulInteractiveElement, Styled, StyledImage, Subscription, Window, div,
+    img, linear_color_stop, linear_gradient, px, rgb, rgba, svg,
 };
 
 use super::{icons, observe};
@@ -71,6 +71,9 @@ impl Render for CoverView {
             None => placeholder(&palette).into_any_element(),
         };
         div()
+            .id("capa")
+            .role(Role::Image)
+            .aria_label("Capa")
             .size_full()
             .rounded(px(12.0))
             .overflow_hidden()

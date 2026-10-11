@@ -1,6 +1,6 @@
 use gpui::{
-    Context, Entity, IntoElement, ParentElement, Render, Styled, Subscription, Window, div, px,
-    relative,
+    Context, Entity, InteractiveElement, IntoElement, ParentElement, Render, Role,
+    StatefulInteractiveElement, Styled, Subscription, Window, div, px, relative,
 };
 
 use super::observe;
@@ -25,6 +25,9 @@ impl Render for ClockView {
         let palette = Palette::for_appearance(window.appearance());
         let clock = self.store.read(cx).model().clock.clone();
         div()
+            .id("relogio")
+            .role(Role::Label)
+            .aria_value(format!("{} de {}", clock.elapsed, clock.total))
             .size_full()
             .flex()
             .flex_col()

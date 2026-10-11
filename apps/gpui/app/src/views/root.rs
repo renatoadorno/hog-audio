@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use gpui::prelude::FluentBuilder;
 use gpui::{
     AppContext, Context, Div, Entity, ExternalPaths, FocusHandle, InteractiveElement, IntoElement,
-    ParentElement, Render, StatefulInteractiveElement, StyleRefinement, Styled, Subscription,
+    ParentElement, Render, Role, StatefulInteractiveElement, StyleRefinement, Styled, Subscription,
     Window, div, px, rgba, svg,
 };
 use hog_player_model::layout::{COLUMN_SPACING, PADDING, cover_side};
@@ -125,6 +125,8 @@ impl RootView {
             .child(
                 div()
                     .id("abrir")
+                    .role(Role::Button)
+                    .aria_label("Abrir arquivos ou pastas")
                     .flex()
                     .items_center()
                     .gap(px(4.0))

@@ -1,7 +1,7 @@
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    Context, Entity, FontWeight, IntoElement, ParentElement, Render, Styled, Subscription, Window,
-    div, px,
+    Context, Entity, FontWeight, InteractiveElement, IntoElement, ParentElement, Render, Role,
+    StatefulInteractiveElement, Styled, Subscription, Window, div, px,
 };
 
 use super::observe;
@@ -24,7 +24,16 @@ impl Render for TrackInfoView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = Palette::for_appearance(window.appearance());
         let display = self.store.read(cx).model().display.clone();
+        let label = [&display.title, &display.artist, &display.album]
+            .into_iter()
+            .filter(|part| !part.is_empty())
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join(", ");
         div()
+            .id("faixa-atual")
+            .role(Role::Label)
+            .aria_value(label)
             .size_full()
             .flex()
             .flex_col()

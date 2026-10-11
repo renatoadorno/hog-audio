@@ -4,12 +4,13 @@
 //! encerra o arrasto. Não há drag do GPUI: com um aberto, cada movimento do mouse redesenha a
 //! janela inteira, sem cache.
 
+use gpui::accesskit::ActionData;
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    Bounds, Context, DispatchPhase, Entity, FontWeight, InteractiveElement, IntoElement,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point,
-    Render, StatefulInteractiveElement, Styled, Subscription, Window, canvas, div, px, relative,
-    svg,
+    AccessibleAction, Bounds, Context, DispatchPhase, Entity, FontWeight, InteractiveElement,
+    IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels,
+    Point, Render, Role, StatefulInteractiveElement, Styled, Subscription, Window, canvas, div, px,
+    relative, svg,
 };
 
 use super::tooltip::tooltip;
@@ -20,6 +21,12 @@ use crate::theme::{CAPTION, Palette, tabular_digits};
 /// Como no NSSlider, o botão fica dentro do trilho: o centro dele anda de um raio a um raio das
 /// pontas, e é esse trecho que vai de 0 a 1.
 const KNOB_RADIUS: f32 = 6.0;
+
+/// O número que a tela mostra e o VoiceOver anuncia. Trunca, como o texto sempre fez: os dois
+/// têm de dizer o mesmo.
+pub fn percent(value: f64) -> i64 {
+    (value * 100.0) as i64
+}
 
 pub struct VolumeView {
     store: Entity<Store>,
@@ -122,11 +129,37 @@ impl Render for VolumeView {
                             .text_color(palette.accent),
                     )
                     .when(volume.muted, |d| {
-                        d.tooltip(tooltip("O device está no mudo"))
+                        let message = "O device está no mudo";
+                        d.role(Role::Image)
+                            .aria_label(message)
+                            .tooltip(tooltip(message))
                     }),
             )
             .child(
                 div()
+                    .id("volume")
+                    .role(Role::Slider)
+                    .aria_label("Volume")
+                    .aria_numeric_value(percent(volume.value) as f64)
+                    .aria_min_numeric_value(0.0)
+                    .aria_max_numeric_value(100.0)
+                    .aria_numeric_value_step(5.0)
+                    .on_a11y_action(AccessibleAction::Increment, {
+                        let store = self.store.clone();
+                        move |_, _, cx| store.update(cx, |s, cx| s.nudge_volume(0.05, cx))
+                    })
+                    .on_a11y_action(AccessibleAction::Decrement, {
+                        let store = self.store.clone();
+                        move |_, _, cx| store.update(cx, |s, cx| s.nudge_volume(-0.05, cx))
+                    })
+                    .on_a11y_action(AccessibleAction::SetValue, {
+                        let store = self.store.clone();
+                        move |data, _, cx| {
+                            if let Some(ActionData::NumericValue(value)) = data {
+                                store.update(cx, |s, cx| s.apply_volume(value / 100.0, cx));
+                            }
+                        }
+                    })
                     .debug_selector(|| "trilho-volume".to_string())
                     .flex_1()
                     .h(px(16.0))
@@ -195,7 +228,7 @@ impl Render for VolumeView {
                     .justify_end()
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(palette.secondary)
-                    .child(format!("{}%", (volume.value * 100.0) as i64)),
+                    .child(format!("{}%", percent(volume.value))),
             )
     }
 }

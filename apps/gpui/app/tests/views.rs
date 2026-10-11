@@ -23,7 +23,7 @@ use hog_player_gpui::views::status::StatusView;
 use hog_player_gpui::views::technical::TechnicalView;
 use hog_player_gpui::views::track_info::TrackInfoView;
 use hog_player_gpui::views::transport::TransportView;
-use hog_player_gpui::views::volume::VolumeView;
+use hog_player_gpui::views::volume::{VolumeView, percent};
 use hog_player_model::controller::Config;
 use hog_player_model::entry::QueueEntryInfo;
 use hog_player_model::metadata::{TrackMetadata, load_track_metadata};
@@ -695,6 +695,14 @@ fn o_passo_do_volume_nao_passa_dos_limites(cx: &mut TestAppContext) {
     store.update(cx, |s, cx| s.nudge_volume(-2.0, cx));
     assert_eq!(store.read_with(cx, |s, _| s.model().volume.value), 0.0);
     store.update(cx, |s, _| assert!(s.wait_idle(PRAZO)));
+}
+
+/// O texto da tela e o nó do slider usam o mesmo número: truncado, então 0,29 (que vira
+/// 28,999…) dá 28 nos dois.
+#[test]
+fn o_percentual_do_volume_trunca_como_o_texto_da_tela() {
+    assert_eq!(percent(0.55), 55);
+    assert_eq!(percent(0.29), 28);
 }
 
 /// O trilho útil, medido no layout: o trilho menos o raio do botão em cada ponta. É o caminho do

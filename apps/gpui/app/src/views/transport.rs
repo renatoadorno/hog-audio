@@ -1,7 +1,7 @@
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    Context, Div, Entity, InteractiveElement, IntoElement, ParentElement, Render, Rgba, Stateful,
-    StatefulInteractiveElement, Styled, Subscription, Window, div, px, svg,
+    Context, Div, Entity, InteractiveElement, IntoElement, ParentElement, Render, Rgba, Role,
+    Stateful, StatefulInteractiveElement, Styled, Subscription, Window, div, px, svg,
 };
 
 use super::{icons, observe};
@@ -73,6 +73,8 @@ impl Render for TransportView {
                     display.can_go_previous,
                     SIDE_DIMMED,
                 )
+                .role(Role::Button)
+                .aria_label("Faixa anterior")
                 .when(display.can_go_previous, |b| {
                     b.on_click(
                         cx.listener(|this, _, _, cx| this.store.update(cx, |s, _| s.previous())),
@@ -89,6 +91,12 @@ impl Render for TransportView {
                     can_toggle,
                     TOGGLE_DIMMED,
                 )
+                .role(Role::Button)
+                .aria_label(if display.is_playing {
+                    "Pausar"
+                } else {
+                    "Tocar"
+                })
                 .when(can_toggle, |b| {
                     b.on_click(
                         cx.listener(|this, _, _, cx| this.store.update(cx, |s, _| s.toggle())),
@@ -105,6 +113,8 @@ impl Render for TransportView {
                     display.can_go_next,
                     SIDE_DIMMED,
                 )
+                .role(Role::Button)
+                .aria_label("Próxima faixa")
                 .when(display.can_go_next, |b| {
                     b.on_click(cx.listener(|this, _, _, cx| this.store.update(cx, |s, _| s.next())))
                 }),

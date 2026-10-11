@@ -5,7 +5,7 @@ use std::sync::Arc;
 use gpui::prelude::FluentBuilder;
 use gpui::{
     AnyElement, Context, Div, Entity, FontWeight, InteractiveElement, IntoElement, ObjectFit,
-    ParentElement, Render, RenderImage, ScrollStrategy, StatefulInteractiveElement, Styled,
+    ParentElement, Render, RenderImage, Role, ScrollStrategy, StatefulInteractiveElement, Styled,
     StyledImage, Subscription, UniformListScrollHandle, Window, div, img, px, rgba, svg,
     uniform_list,
 };
@@ -23,6 +23,8 @@ use crate::theme::{
 /// O que uma linha visível precisa, copiado do modelo antes de desenhar: a conversão das
 /// miniaturas precisa de `&mut App`, que não convive com o empréstimo do `Store`.
 struct Row {
+    index: usize,
+    total: usize,
     id: u64,
     path: String,
     failure: Option<String>,
@@ -97,6 +99,8 @@ impl QueueView {
             range
                 .filter_map(|index| {
                     queue.items.get(index).map(|track| Row {
+                        index,
+                        total: queue.items.len(),
                         id: track.id,
                         path: track.path.clone(),
                         failure: track.failure.clone(),
@@ -143,6 +147,11 @@ impl QueueView {
         let (hover, selected_bg, id) = (palette.fill, palette.accent_soft, row.id);
         div()
             .id(("faixa", row.id))
+            .role(Role::ListItem)
+            .aria_label(row_label(&row, &title, &subtitle, problem.as_deref()))
+            .aria_position_in_set(row.index + 1)
+            .aria_size_of_set(row.total)
+            .aria_selected(row.selected)
             .debug_selector(move || format!("linha-{id}"))
             .h(px(ROW_HEIGHT))
             .w_full()
@@ -192,6 +201,32 @@ impl QueueView {
             )
             .into_any_element()
     }
+}
+
+/// O que o VoiceOver lê numa linha: título, artista e álbum, qualidade, duração e o estado.
+fn row_label(row: &Row, title: &str, subtitle: &str, problem: Option<&str>) -> String {
+    let entry = row.entry.as_ref();
+    let mut parts = vec![title.to_string()];
+    parts.extend(
+        [
+            Some(subtitle.to_string()).filter(|s| !s.is_empty()),
+            entry.and_then(|e| e.quality.clone()),
+            entry.and_then(|e| e.duration.clone()),
+        ]
+        .into_iter()
+        .flatten(),
+    );
+    if row.is_current {
+        parts.push(if row.is_playing {
+            "tocando".to_string()
+        } else {
+            "atual".to_string()
+        });
+    }
+    if let Some(problem) = problem {
+        parts.push(format!("problema: {problem}"));
+    }
+    parts.join(", ")
 }
 
 fn thumb_cell(
@@ -346,6 +381,8 @@ impl Render for QueueView {
                 CAPTION
                     .apply(div())
                     .id("limpar")
+                    .role(Role::Button)
+                    .aria_label("Limpar a fila")
                     .debug_selector(|| "limpar".to_string())
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(clear_color)
@@ -381,6 +418,9 @@ impl Render for QueueView {
                 .into_any_element()
         } else {
             div()
+                .id("fila-lista")
+                .role(Role::List)
+                .aria_label("Fila")
                 .flex_1()
                 .min_h(px(0.0))
                 .child(
