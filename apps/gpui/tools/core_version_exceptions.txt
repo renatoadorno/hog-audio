@@ -1,0 +1,32 @@
+# Exceções do gate do protótipo (apps/gpui/tools/check_core_untouched.sh): pacotes da árvore do
+# core que saem diferentes no protótipo e que `cargo update --precise` não alinha.
+#
+# Formato: uma exceção por linha, com quatro campos separados por "|":
+#   pacote | valor no core | valor no protótipo | motivo
+# Os valores são os que o gate imprime: cada versão com as features ativadas entre colchetes,
+# separadas por " ; " quando o pacote aparece mais de uma vez (alvo e host), e "ausente" quando o
+# pacote não está na árvore daquele lado. O motivo não leva "|" e cita o arquivo:linha de quem
+# impõe a diferença. Linhas começadas por "#" e linhas vazias são ignoradas.
+#
+# O gate reprova se uma diferença não estiver aqui, se os valores de uma exceção não baterem com a
+# árvore, se uma exceção listada já não diferir e se a exceção for de coreaudio-sys ou uniffi*.
+#
+# Caminhos: "zed@v1.21.0:" é o checkout do Zed em ~/.cargo/git/checkouts/zed-a70e2ad075855582/33c9585;
+# "crates.io:" é ~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f.
+
+bindgen | 0.72.1 [runtime] | 0.72.1 [default,logging,prettyplease,runtime] | o gpui e o media do Zed pedem bindgen com as features padrão (zed@v1.21.0:crates/gpui/Cargo.toml:162, zed@v1.21.0:crates/media/Cargo.toml:27), e o padrão liga logging e prettyplease (crates.io:bindgen-0.72.1/Cargo.toml:76-80); é o mesmo bindgen de build que gera as bindings do coreaudio-sys
+prettyplease | ausente | 0.2.37 [verbatim] | entra pela feature prettyplease do bindgen (crates.io:bindgen-0.72.1/Cargo.toml:78), ligada pelo padrão que o gpui e o media do Zed pedem (zed@v1.21.0:crates/gpui/Cargo.toml:162, zed@v1.21.0:crates/media/Cargo.toml:27)
+log | 0.4.33 [] | 0.4.34 [alloc,kv,kv_serde,kv_std,kv_unstable,kv_unstable_serde,kv_unstable_std,serde,serde_core,std,value-bag] | versão: o lofty 0.25.4, fixado com "=" no protótipo (apps/gpui/Cargo.toml:19), exige log ^0.4.34 (crates.io:lofty-0.25.4/Cargo.toml:77-78), e o resolver recusa a 0.4.33; features: o workspace do Zed liga kv_unstable_serde e serde no log (zed@v1.21.0:Cargo.toml:682)
+value-bag | ausente | 1.12.0 [alloc,error,inline-i128,serde,serde1,std,value-bag-serde1] | entra pelo kv_unstable_serde do log (crates.io:log-0.4.34/Cargo.toml:63-70 e :125-129), que o workspace do Zed liga (zed@v1.21.0:Cargo.toml:682)
+value-bag-serde1 | ausente | 1.12.0 [alloc,std] | entra pela feature serde do value-bag (crates.io:value-bag-1.12.0/Cargo.toml:62-65), ligada pelo kv_serde do log (crates.io:log-0.4.34/Cargo.toml:49), que o workspace do Zed liga (zed@v1.21.0:Cargo.toml:682)
+erased-serde | ausente | 0.4.9 [alloc,std] | dependência do value-bag-serde1 (crates.io:value-bag-serde1-1.12.0/Cargo.toml:41-43), que entra pelo log com o kv_unstable_serde do Zed (zed@v1.21.0:Cargo.toml:682)
+serde_fmt | ausente | 1.0.3 [] | dependência do value-bag-serde1 (crates.io:value-bag-serde1-1.12.0/Cargo.toml:56-58), que entra pelo log com o kv_unstable_serde do Zed (zed@v1.21.0:Cargo.toml:682)
+typeid | ausente | 1.0.3 [] | dependência do erased-serde (crates.io:erased-serde-0.4.9/Cargo.toml:79), que entra pelo log com o kv_unstable_serde do Zed (zed@v1.21.0:Cargo.toml:682)
+serde | 1.0.229 [default,derive,serde_derive,std] | 1.0.229 [alloc,default,derive,rc,serde_derive,std] ; 1.0.229 [default,derive,rc,serde_derive,std] | o workspace do Zed liga rc no serde (zed@v1.21.0:Cargo.toml:821), no alvo pelo gpui e no host pelo perf do util_macros; o schemars do gpui liga alloc no alvo (crates.io:schemars-1.0.4/Cargo.toml:178-181)
+serde_core | 1.0.229 [alloc,default,result,std] ; 1.0.229 [alloc,result,std] | 1.0.229 [alloc,default,rc,result,std] ; 1.0.229 [alloc,rc,result,std] | o rc do serde repassa para o serde_core (crates.io:serde-1.0.229/Cargo.toml:69), e o workspace do Zed liga rc no serde (zed@v1.21.0:Cargo.toml:821)
+serde_json | 1.0.151 [default,std,unbounded_depth] | 1.0.151 [alloc,default,indexmap,preserve_order,raw_value,std,unbounded_depth] | o workspace do Zed liga preserve_order e raw_value no serde_json do gpui (zed@v1.21.0:Cargo.toml:822), e o preserve_order liga indexmap (crates.io:serde_json-1.0.151/Cargo.toml:70); o schemars do gpui liga alloc (crates.io:schemars-1.0.4/Cargo.toml:183-186)
+indexmap | 2.14.0 [default,serde,std] ; 2.14.0 [default,std] | 2.14.0 [default,serde,std] | no host, o collections do Zed liga serde no indexmap (zed@v1.21.0:Cargo.toml:667, zed@v1.21.0:crates/collections/Cargo.toml:20); ele entra no host pelo perf, dependência do proc-macro util_macros do gpui
+libc | 0.2.189 [std] | 0.2.189 [default,std] ; 0.2.189 [std] | no alvo, as crates de macOS do GPUI pedem libc com as features padrão, como o gpui_macos (zed@v1.21.0:Cargo.toml:677, zed@v1.21.0:crates/gpui_macos/Cargo.toml:48) e o core-foundation (crates.io:core-foundation-0.10.0/Cargo.toml:50-51)
+memchr | 2.8.3 [alloc,default,std] ; 2.8.3 [alloc,std] | 2.8.3 [alloc,default,std] | no alvo, o futures-util e o compression-codecs da árvore do GPUI pedem memchr com as features padrão (crates.io:futures-util-0.3.34/Cargo.toml:156-158, crates.io:compression-codecs-0.4.31/Cargo.toml:116-118)
+fastrand | 2.5.0 [alloc,default,std] | 2.5.0 [alloc,default,getrandom,js,std] ; 2.5.0 [alloc,default,std] | no alvo, o flume do scheduler do gpui pede fastrand com a feature js, que liga getrandom (crates.io:flume-0.12.0/Cargo.toml:169-173)
+syn | 2.0.119 [clone-impls,default,derive,extra-traits,full,parsing,printing,proc-macro,visit-mut] ; 3.0.3 [clone-impls,default,derive,full,parsing,printing,proc-macro] | 2.0.119 [clone-impls,default,derive,extra-traits,fold,full,parsing,printing,proc-macro,visit,visit-mut] ; 3.0.3 [clone-impls,default,derive,extra-traits,full,parsing,printing,proc-macro] | no host, o cbindgen de build do gpui_apple e os derives do yoke e do zerofrom (via url do gpui) pedem fold no syn 2 (crates.io:cbindgen-0.28.0/Cargo.toml:93-98, crates.io:yoke-derive-0.8.2/Cargo.toml:59-61, crates.io:zerofrom-derive-0.1.6/Cargo.toml:58-60), o synstructure pede visit (crates.io:synstructure-0.13.2/Cargo.toml:54-61), e o zerovec-derive pede extra-traits no syn 3 (crates.io:zerovec-derive-0.11.5/Cargo.toml:81-83)

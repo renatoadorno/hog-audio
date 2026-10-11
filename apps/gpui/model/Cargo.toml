@@ -1,0 +1,13 @@
+[package]
+name = "hog-player-model"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+hog-audio.workspace = true
+image.workspace = true
+lofty.workspace = true
+
+[dev-dependencies]
+hog-player-testing = { path = "../testing" }

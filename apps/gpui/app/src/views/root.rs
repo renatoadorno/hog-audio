@@ -1,0 +1,239 @@
+use std::path::PathBuf;
+
+use gpui::prelude::FluentBuilder;
+use gpui::{
+    AnyElement, AppContext, Context, Div, Entity, ExternalPaths, FocusHandle, InteractiveElement,
+    IntoElement, ParentElement, Render, Role, StatefulInteractiveElement, StyleRefinement, Styled,
+    Subscription, Window, div, px, rgba, svg,
+};
+use hog_player_model::layout::{COLUMN_SPACING, PADDING, cover_side};
+
+use super::backdrop::BackdropView;
+use super::clock::ClockView;
+use super::cover::CoverView;
+use super::queue::QueueView;
+use super::status::StatusView;
+use super::technical::TechnicalView;
+use super::tooltip::tooltip;
+use super::track_info::TrackInfoView;
+use super::transport::TransportView;
+use super::volume::VolumeView;
+use super::{icons, observe};
+use crate::actions::Open;
+use crate::store::Store;
+use crate::theme::*;
+
+pub struct RootView {
+    store: Entity<Store>,
+    backdrop: Entity<BackdropView>,
+    cover: Entity<CoverView>,
+    track_info: Entity<TrackInfoView>,
+    clock: Entity<ClockView>,
+    transport: Entity<TransportView>,
+    volume: Entity<VolumeView>,
+    technical: Entity<TechnicalView>,
+    status: Entity<StatusView>,
+    queue: Entity<QueueView>,
+    focus: FocusHandle,
+    _error: Subscription,
+}
+
+/// Caching exige tamanho definido: a view em cache é posta em `style`, não medida pelo conteúdo.
+fn sized(width: f32, height: f32) -> StyleRefinement {
+    StyleRefinement::default().w(px(width)).h(px(height))
+}
+
+/// Uma view filha da raiz, posta em `style`. Sem cache, ela vai num contêiner com o mesmo estilo,
+/// para o layout não mudar. A raiz tira o cache com a acessibilidade ligada: no GPUI v1.21, a view
+/// em cache reaproveitada (`Window::reuse_prepaint`) não repõe os nós do AccessKit, e eles somem
+/// da árvore no primeiro quadro em que ela não redesenha.
+pub fn slot<V: Render>(view: &Entity<V>, style: StyleRefinement, cached: bool) -> AnyElement {
+    if cached {
+        return view.clone().cached(style).into_any_element();
+    }
+    let mut container = div();
+    *container.style() = style;
+    container.child(view.clone()).into_any_element()
+}
+
+fn spacer(height: f32) -> Div {
+    div().h(px(height)).flex_shrink_0()
+}
+
+impl RootView {
+    pub fn new(store: Entity<Store>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let _error = observe(&store, |s| &s.error, cx);
+        let focus = cx.focus_handle();
+        window.focus(&focus, cx);
+        Self {
+            backdrop: cx.new(|cx| BackdropView::new(store.clone(), cx)),
+            cover: cx.new(|cx| CoverView::new(store.clone(), cx)),
+            track_info: cx.new(|cx| TrackInfoView::new(store.clone(), cx)),
+            clock: cx.new(|cx| ClockView::new(store.clone(), cx)),
+            transport: cx.new(|cx| TransportView::new(store.clone(), cx)),
+            volume: cx.new(|cx| VolumeView::new(store.clone(), window, cx)),
+            technical: cx.new(|cx| TechnicalView::new(store.clone(), cx)),
+            status: cx.new(|cx| StatusView::new(store.clone(), cx)),
+            queue: cx.new(|cx| QueueView::new(store.clone(), cx)),
+            store,
+            focus,
+            _error,
+        }
+    }
+
+    /// Soltar do Finder: o controlador expande pastas e filtra o que não é áudio. A fila nova
+    /// chega pelo tique, com os sinais da fila e das linhas.
+    pub fn accept_drop(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        self.store.update(cx, |s, _| s.add(paths));
+    }
+
+    fn left_column(&self, cover: f32, cached: bool) -> Div {
+        div()
+            .debug_selector(|| "coluna".to_string())
+            .w(px(cover))
+            .flex_shrink_0()
+            .flex()
+            .flex_col()
+            .child(slot(&self.cover, sized(cover, cover), cached))
+            .child(spacer(GAP))
+            .child(slot(&self.track_info, sized(cover, TITLE_BLOCK), cached))
+            .child(spacer(GAP))
+            .child(slot(&self.clock, sized(cover, CLOCK_HEIGHT), cached))
+            .child(spacer(GAP))
+            .child(slot(
+                &self.transport,
+                sized(cover, TRANSPORT_HEIGHT),
+                cached,
+            ))
+            .child(spacer(GAP))
+            .child(self.volume_slot(cover, cached))
+            .child(spacer(TECHNICAL_GAP))
+            .child(slot(
+                &self.technical,
+                sized(cover, TECHNICAL_HEIGHT),
+                cached,
+            ))
+    }
+
+    fn volume_slot(&self, cover: f32, cached: bool) -> AnyElement {
+        slot(&self.volume, sized(cover, VOLUME_HEIGHT), cached)
+    }
+
+    fn queue_slot(&self, width: f32, height: f32, cached: bool) -> AnyElement {
+        slot(&self.queue, sized(width, height), cached)
+    }
+
+    fn title_bar(&self, palette: &Palette) -> Div {
+        let hover = palette.fill;
+        div()
+            .absolute()
+            .top_0()
+            .left_0()
+            .w_full()
+            .h(px(TITLEBAR_HEIGHT))
+            .flex()
+            .items_center()
+            .justify_end()
+            .pr(px(16.0))
+            .child(
+                div()
+                    .id("abrir")
+                    .role(Role::Button)
+                    .aria_label("Abrir arquivos ou pastas")
+                    .flex()
+                    .items_center()
+                    .gap(px(4.0))
+                    .px(px(8.0))
+                    .py(px(4.0))
+                    .rounded(px(6.0))
+                    .hover(move |s| s.bg(hover))
+                    .text_size(px(13.0))
+                    .child(
+                        svg()
+                            .data(icons::PLUS)
+                            .size(px(14.0))
+                            .text_color(palette.foreground),
+                    )
+                    .child("Abrir")
+                    .tooltip(tooltip("Abrir arquivos ou pastas"))
+                    .on_click(|_, window, cx| window.dispatch_action(Box::new(Open), cx)),
+            )
+    }
+}
+
+impl Render for RootView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let palette = Palette::for_appearance(window.appearance());
+        let viewport = window.viewport_size();
+        let width = f32::from(viewport.width);
+        let height = f32::from(viewport.height) - TITLEBAR_HEIGHT;
+        let cover = cover_side(width, height);
+        let has_error = self.store.read(cx).model().error.is_some();
+        let status = if has_error {
+            STATUS_HEIGHT + STATUS_GAP
+        } else {
+            0.0
+        };
+        let queue_width = width - 2.0 * PADDING - COLUMN_SPACING - cover;
+        let queue_height = height - 2.0 * PADDING - status;
+        // A ativação força um quadro completo (`window.rs` do gpui, task que chama `refresh`). No
+        // macOS ela é pegajosa: o primeiro pedido de qualquer cliente AX ativa
+        // (`accesskit_macos` 0.26.3, `subclass.rs`) e o `gpui_macos` descarta a desativação
+        // (`a11y_init`). Daí em diante a janela segue sem cache até fechar, então medir desempenho
+        // pede relançar o app depois de usar uma ferramenta de acessibilidade.
+        let cached = !window.is_a11y_active();
+
+        div()
+            .id("raiz")
+            .key_context("Player")
+            .track_focus(&self.focus)
+            .size_full()
+            .relative()
+            .font_family(FONT)
+            .bg(palette.background)
+            .text_color(palette.foreground)
+            .child(slot(
+                &self.backdrop,
+                StyleRefinement::default().absolute().size_full(),
+                cached,
+            ))
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
+                this.accept_drop(paths.paths().to_vec(), cx);
+            }))
+            .drag_over::<ExternalPaths>(|style, _, _, _| {
+                style.border_3().border_color(rgba(0xfa6112e6))
+            })
+            .child(self.title_bar(&palette))
+            .child(
+                div()
+                    .absolute()
+                    .top(px(TITLEBAR_HEIGHT))
+                    .left_0()
+                    .w(px(width))
+                    .h(px(height))
+                    .p(px(PADDING))
+                    .flex()
+                    .flex_row()
+                    .gap(px(COLUMN_SPACING))
+                    .child(self.left_column(cover, cached))
+                    .child(
+                        div()
+                            .w(px(queue_width))
+                            .h_full()
+                            .flex()
+                            .flex_col()
+                            .gap(px(STATUS_GAP))
+                            // Sem erro não entra nada: um filho vazio ainda levaria o `gap`
+                            // e desceria a fila.
+                            .when(has_error, |c| {
+                                c.child(slot(
+                                    &self.status,
+                                    sized(queue_width, STATUS_HEIGHT),
+                                    cached,
+                                ))
+                            })
+                            .child(self.queue_slot(queue_width, queue_height, cached)),
+                    ),
+            )
+    }
+}

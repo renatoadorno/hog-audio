@@ -1,0 +1,9 @@
+[package]
+name = "hog-player-testing"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+hog-audio.workspace = true
+hog-player-model = { path = "../model" }

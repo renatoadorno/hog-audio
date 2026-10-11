@@ -1,0 +1,37 @@
+# Protótipo de UI em GPUI. Workspace próprio, com lock e target próprios: nunca vira workspace
+# com o `rust/`, para o lockfile do core não mudar. Spec:
+# docs/superpowers/specs/2026-09-27-prototipo-gpui-design.md
+[workspace]
+resolver = "3"
+members = ["model", "app", "testing"]
+# O gpui_macos vendorizado é dependência, não membro: fica fora do fmt, do clippy e dos testes.
+exclude = ["vendor"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace.dependencies]
+futures = "0.3.34"
+hog-audio = { path = "../../rust" }
+gpui = { git = "https://github.com/zed-industries/zed", tag = "v1.21.0" }
+# Sem `font-kit` o gpui_macos cai no NoopTextSystem e a janela abre sem texto.
+gpui_platform = { git = "https://github.com/zed-industries/zed", tag = "v1.21.0", features = ["font-kit"] }
+# Só para o app ligar a feature do experimento `exp-display-link` no gpui_macos vendorizado.
+gpui_macos = { git = "https://github.com/zed-industries/zed", tag = "v1.21.0", default-features = false }
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
+lofty = "=0.25.4"
+signal-hook = "0.4.4"
+
+# Réplica do [patch.crates-io] do workspace do Zed (Cargo.toml:996-1021 na v1.21.0), só com o que
+# entra na árvore do macOS. Fora do workspace do Zed o patch dele não vale. Lista conferida na
+# Task 0, Step 6.
+[patch.crates-io]
+async-task = { git = "https://github.com/smol-rs/async-task", rev = "b4486cd71e4e94fbda54ce6302444de14f4d190e" }
+
+# Experimento `exp-display-link`: o gpui_macos da tag com o display link parado quando ocioso. O
+# Cargo não tem patch condicional, então o patch vale sempre; a mudança de comportamento fica atrás
+# da feature `exp-display-link` do crate vendorizado, e sem ela o código é o da tag.
+[patch."https://github.com/zed-industries/zed"]
+gpui_macos = { path = "vendor/gpui_macos" }
