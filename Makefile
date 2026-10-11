@@ -147,3 +147,6 @@ gpui-test:
 	@cd $(GPUI_DIR) && cargo fmt --all --check
 	@cd $(GPUI_DIR) && cargo clippy --locked --workspace --all-targets -- -D warnings
 	@cd $(GPUI_DIR) && cargo test --locked --workspace
+
+gpui-app: gpui
+	@$(GPUI_DIR)/tools/make_app.sh
