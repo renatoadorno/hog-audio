@@ -213,3 +213,99 @@ Depurar › Provocar pânico.
 
 - Build limpo: 4 min 11 s (protótipo) contra 1 min 51 s (controle), 2,3 vezes mais tempo.
 - Crates: 397 contra 86. Tamanho do `.app`: 14 MB contra 2,0 MB, 7 vezes maior.
+
+## Experimento: sem o poll e com o display link parado
+
+Feito depois do resultado, a pedido do usuário, para separar o custo do app do custo do GPUI.
+Branch `exp/gpui-parado` (commit 309d9d9, a partir de e197121), numa worktree; a `proto/gpui`
+não foi tocada. Quatro variantes do mesmo protótipo:
+
+- **base:** o código da `proto/gpui`, com o GPUI da tag.
+- **sem-poll:** o poll de 10 Hz só roda tocando. Parado, o `Store` dorme e acorda por comando,
+  carga ou sinal.
+- **display-link:** o `gpui_macos` vendorizado com um patch de 149 linhas. O macOS passa a ter o
+  `frame_waker` que o GPUI já usa em outras plataformas, e o `CVDisplayLink` para um quadro
+  depois do último pedido de quadro. Na tag ele fica ligado sempre com a janela visível.
+- **ambos:** as duas mudanças.
+
+Mesma máquina e mesmo roteiro da medição 1, em 11/10, com janelas de 20 s e duas rodadas. As
+rodadas foram intercaladas: a 1ª de todas as variantes, depois a 2ª. Sem macos-use. O controle
+SwiftUI foi medido de novo só vazio, para ver a deriva da máquina. Tocando, o slider ficou em
+9% em todas as rodadas, conferido por captura. Cada item traz a mediana, a média e o máximo de
+CPU (%), uma rodada por linha.
+
+### Vazio, na frente
+
+- Controle: 0,40 / 2,37 / 9,00 e 0,30 / 0,30 / 1,00.
+- base: 1,30 / 2,54 / 7,60 e 1,10 / 1,10 / 1,50.
+- sem-poll: 1,05 / 1,05 / 1,40 e 0,80 / 0,81 / 1,30.
+- display-link: 0,20 / 0,24 / 0,70 e 0,20 / 0,20 / 0,60.
+- ambos: 0,00 / 0,02 / 0,40 e 0,00 / 0,58 / 4,10.
+
+### Vazio, minimizado
+
+- Controle: 0,20 / 0,23 / 0,30 e 0,30 / 0,59 / 3,90.
+- base: 0,25 / 2,36 / 12,80 e 0,20 / 0,20 / 0,20.
+- sem-poll: 0,00 / 0,01 / 0,20 nas duas.
+- display-link: 0,20 / 0,23 / 0,40 e 0,20 / 0,24 / 0,50.
+- ambos: 0,00 / 0,01 / 0,30 e 0,00 / 0,29 / 3,00.
+
+O footprint vazio ficou em 32 a 36 MB em todas, controle incluído.
+
+### Fila e faixa pausada, na frente
+
+- base: 1,40 / 1,41 / 1,80 e 1,50 / 1,52 / 1,90.
+- sem-poll: 0,90 / 1,02 / 1,70 e 1,10 / 1,15 / 1,50.
+- display-link: 0,60 / 0,92 / 5,90 e 0,70 / 0,75 / 2,20.
+- ambos: 0,40 / 0,41 / 0,80 e 0,40 / 0,39 / 0,70.
+
+### Fila e faixa pausada, minimizado
+
+- base: 0,60 / 0,62 / 0,80 e 0,70 / 0,66 / 1,00.
+- sem-poll: 0,40 / 0,37 / 0,60 e 0,30 / 0,33 / 0,40.
+- display-link: 0,70 / 0,67 / 0,90 e 0,50 / 0,49 / 0,70.
+- ambos: 0,40 / 0,38 / 0,50 e 0,40 / 0,39 / 0,60.
+
+Com a fila carregada, todas ficaram em 115 a 120 MB. Depois de rolar a fila inteira, a faixa foi
+de 74 a 130 MB, sem padrão por variante: a sem-poll deu 130 MB numa rodada e 96 MB na outra.
+
+### Tocando, na frente
+
+- base: 5,55 / 5,29 / 6,30 e 5,60 / 5,46 / 6,00.
+- sem-poll: 5,30 / 5,21 / 6,30 e 4,25 / 4,28 / 5,30.
+- display-link: 4,20 / 4,34 / 5,80 e 5,35 / 6,55 / 14,90.
+- ambos: 5,50 / 5,20 / 5,80 e 5,25 / 4,91 / 5,70.
+
+Footprint tocando: 78 a 87 MB.
+
+### Conferência visual do display-link
+
+Feita à mão, no fone a 9%, com capturas de tela:
+- a janela abre com a fila;
+- o hover das linhas aparece em menos de 150 ms;
+- o tooltip do selo aparece;
+- o relógio avança tocando;
+- o título muda na navegação;
+- o cruzamento de 400 ms do fundo passa por cerca de 8 quadros capturados entre 0 e 550 ms,
+  saindo de uma capa e chegando à outra.
+
+Não foram conferidos o redimensionamento, o arrasto da janela e o ProMotion. No ProMotion, a
+variante perde o `present` sustentado por 1 s depois de entrada rápida.
+
+### Leitura rápida
+
+- A base reproduz a medição 1: 1,40 e 1,50% com a fila na frente, contra 1,45 e 1,50% antes.
+  Vazio, ela deu 1,10 e 1,30%, contra 0,70 e 0,80% antes. O controle vazio também subiu, de 0,20
+  para 0,30 e 0,40%: a máquina estava um pouco mais ruidosa.
+- O display link custa cerca de 0,8 a 1,0 ponto com a janela na frente:
+  - vazio, de 1,10 e 1,30% para 0,20%;
+  - com a fila, de 1,40 e 1,50% para 0,60 e 0,70%.
+  Minimizado ele já está parado na tag, e as variantes empatam.
+- O poll custa cerca de 0,2 a 0,3 ponto:
+  - vazio na frente, de 0,20% para 0,00% com o link parado;
+  - vazio minimizado, de 0,20 e 0,25% para 0,00%.
+- Sem os dois, sobram 0,40% com a faixa pausada, na frente e minimizado. Vazio, o resto é 0. O
+  resíduo vem de algo que fica ativo com o device tomado em pausa, fora do poll e do desenho.
+  Não foi investigado.
+- Tocando, as quatro empatam dentro do ruído (4,2 a 5,6%). O link ligando e desligando a cada
+  tique não aparece no custo.

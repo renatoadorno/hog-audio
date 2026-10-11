@@ -39,10 +39,69 @@ Não há ADR a escrever.
 - A acessibilidade exige tirar o cache das views, e no macOS a ativação não desliga.
 - A barra de título só arrasta nos 28 pt de cima.
 
-Os números absolutos são pequenos (1,5% de um núcleo). A causa provável é a do enunciado da
-spec: o display link do GPUI acorda a main thread com a janela visível (a thread `CVDisplayLink`
-aparece viva no `sample`), somado ao poll de 10 Hz sem folga. Minimizado, a diferença quase some
-com o app vazio (0,20 a 0,25% contra 0,20%).
+Os números absolutos são pequenos (1,5% de um núcleo). O experimento feito depois separou as
+causas. Cerca de 0,8 a 1,0 ponto vem do display link do `gpui_macos`, que na tag fica ligado
+sempre que a janela está visível. Cerca de 0,2 a 0,3 ponto vem do poll de 10 Hz do app. O custo
+parado é, na maior parte, do GPUI e não do protótipo. Os números estão na seção "Experimento".
+
+## Experimento: de onde vem o custo parado
+
+Feito depois do veredito, a pedido do usuário. Fica na branch `exp/gpui-parado` (309d9d9), numa
+worktree; a `proto/gpui` não foi tocada. Os números brutos estão na seção "Experimento" das
+medições.
+
+Quatro variantes do protótipo:
+- **base:** o código desta branch;
+- **sem-poll:** o poll de 10 Hz só roda tocando;
+- **display-link:** o `gpui_macos` vendorizado com um patch de 149 linhas. O macOS ganha o
+  `frame_waker` que o GPUI já usa em outras plataformas, e o `CVDisplayLink` para um quadro
+  depois do último pedido de quadro;
+- **ambos:** as duas mudanças juntas.
+
+O que a tag faz, lido no código:
+- o display link fica ligado o tempo todo com a janela visível e só para quando ela some
+  (minimizada, oculta, coberta, em outro Space ou com o display dormindo);
+- a cada vsync, o GPUI faz duas atualizações da janela mesmo sem nada a desenhar;
+- o macOS não implementa o `frame_waker` (`gpui/src/platform.rs:938`).
+
+Resultados, em mediana de CPU, com janelas de 20 s e duas rodadas intercaladas:
+
+- **Vazio, na frente.** A base ficou em 1,10 e 1,30%. Sem o poll, 0,80 e 1,05%. Com o link
+  parado, 0,20%. Com os dois, 0,00%. O controle, medido no mesmo dia, deu 0,30 e 0,40%.
+- **Fila com faixa pausada, na frente.** A base ficou em 1,40 e 1,50%, reproduzindo a medição 1.
+  Sem o poll, 0,90 e 1,10%. Com o link parado, 0,60 e 0,70%, o nível do controle na medição 1.
+  Com os dois, 0,40%.
+- **Minimizado.** O link já está parado na tag. Tirar o poll leva o app vazio de 0,20 e 0,25%
+  a 0,00%. Com a faixa pausada, sobram 0,40% nas variantes sem poll. Esse resíduo, com o device
+  tomado em pausa, não foi investigado. Na medição 1, a parte dele no controle não foi separada.
+- **Tocando.** As quatro empatam dentro do ruído, de 4,2 a 5,6%. O link ligando e desligando a
+  cada tique não aparece no custo.
+- **Memória.** Não muda com as variantes.
+
+A variante display-link foi conferida à mão com capturas:
+- a fila aparece;
+- o hover e o tooltip aparecem;
+- o relógio avança tocando;
+- o cruzamento de 400 ms do fundo anima até o fim.
+
+O redimensionamento, o arrasto da janela e o ProMotion não foram conferidos.
+
+**O que isso faz com o veredito.** A regra deste doc era refazer a comparação se o custo parado
+caísse ao nível do SwiftUI, e tratá-lo como custo do GPUI, que vale também para o vitral, se não
+caísse. As duas metades valem:
+- **Do GPUI:** o custo é do GPUI da tag, não do app.
+- **Removível:** só remendando o `gpui_macos`. A v1.21 não tem API para parar o link.
+- **No nível do SwiftUI:** com o patch, o protótipo chega ao nível do SwiftUI, e fica abaixo
+  dele com o poll também desligado.
+
+O veredito acima continua valendo para o GPUI como ele é publicado. Refazer a comparação com o
+patch é decisão do usuário, e o patch traz custos:
+- um `gpui_macos` próprio para manter a cada tag. É o que o vitral seria;
+- sem o poll, a suspeita de device perdido, o problema novo do engine e o volume mudado por fora
+  com o player pausado esperam o próximo comando;
+- no ProMotion, perde-se o `present` sustentado por 1 s depois de entrada rápida;
+- o patch não entra na `proto/gpui` como está, porque o `[patch]` do Cargo vale para o workspace
+  inteiro.
 
 ## O que foi construído
 
@@ -130,8 +189,9 @@ usuário: CPU e RAM, sem energia e sem `sudo`).
   m4b, m4r, au, snd, amr, ac3, ogg, opus, wma, ape e wv, que o `UTType.audio` aceita.
 - **Delete na janela inteira:** o protótipo não tem campo de texto; no SwiftUI ele vale só com a
   lista em foco.
-- **Timer sem folga:** o timer do GPUI não expõe tolerância; o do SwiftUI tem 20 ms. Pode pesar
-  no custo parado.
+- **Timer sem folga:** o timer do GPUI não expõe tolerância; o do SwiftUI tem 20 ms. A spec
+  previa trocá-lo por um timer de GCD com folga se o poll pesasse. O experimento foi além e
+  parou o poll fora da reprodução. O ganho foi de 0,2 a 0,3 ponto, menos que o do display link.
 - **`lofty` no lugar do AVFoundation:** lê só as tags, sem as propriedades do áudio; o selo
   continua vindo do `probe_track` do core.
 - **Painel de abrir sem filtro:** limitação da API do GPUI.
@@ -148,7 +208,21 @@ usuário: CPU e RAM, sem energia e sem `sudo`).
 - O laço de escritas de volume recusadas (lido no código) não foi reproduzido: o único device
   sem controle de volume à mão não recebe escrita nenhuma.
 
-**Passo seguinte, se valer insistir no GPUI:** separar o custo do app do custo do GPUI, medindo
-o protótipo sem o poll de 10 Hz (ou com o poll acordado só por mudança) e com o display link
-parado quando nada anima. Se o parado cair ao nível do SwiftUI, a comparação se refaz; se não,
-o custo é do GPUI e vale para o vitral também.
+## Riscos que ficam
+
+- **`objc2` #861:** o lock tem o `objc2` 0.6.3 e o 0.5.2, provavelmente afetados pelo
+  use-after-free em release do #861. Em 27/09 a correção estava só no main do `objc2`, com
+  backport anunciado para 0.6.5 e 0.5.3 e sem release. A versão não foi trocada, por decisão do
+  usuário no passo 0.
+- **Pânico no IOProc:** o `io_proc` do core (`rust/src/playback.rs`) é `extern "C"` e roda na
+  thread de IO sem `catch_unwind`. Um pânico ali aborta o processo, e o hook do protótipo só
+  devolve o device em pânico da main thread. Nesse caso o rate e o volume não voltam. É
+  improvável, e vale igual para o controle, que usa o mesmo core.
+- **A raiz renderiza a cada quadro desenhado:** o GPUI refaz o layout da view raiz em todo
+  quadro (`gpui/src/window.rs:3418` na tag). Só as filhas em cache são poupadas, e o cache sai
+  com a acessibilidade ativa.
+
+**Passo seguinte, se valer insistir no GPUI:** refazer a comparação com a variante "ambos" do
+experimento e decidir se o patch do `gpui_macos` entra no vitral ou se vale propor ao Zed o
+`frame_waker` no macOS. O patch precisa antes ser conferido em redimensionamento, em arrasto e
+no ProMotion.
