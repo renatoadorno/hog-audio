@@ -12,6 +12,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use gpui::{App, Entity};
 use hog_player_model::controller::LogSink;
+#[cfg(feature = "exp-sem-poll")]
+use hog_player_model::controller::Wake;
 use hog_player_model::port::Player;
 use signal_hook::consts::{SIGHUP, SIGINT, SIGQUIT, SIGTERM};
 use signal_hook::iterator::Signals;
@@ -130,6 +132,25 @@ pub fn watch_signals_with(
                 if is_emergency(signal, now.saturating_duration_since(first)) {
                     on_emergency(signal);
                 }
+            }
+        })?;
+    Ok(())
+}
+
+/// Experimento `exp-sem-poll`: com o poll dormindo, o pedido de saída do `watch_signals` esperaria
+/// o próximo wake, e o segundo sinal cairia na saída de emergência sem devolver o device. Um segundo
+/// leitor dos mesmos sinais acorda o Store; o signal-hook entrega cada sinal a todos os `Signals`.
+#[cfg(feature = "exp-sem-poll")]
+pub fn wake_on_signals(quit: Arc<AtomicBool>, wake: Wake) -> std::io::Result<()> {
+    // Os mesmos do `watch_signals`; a lista não foi extraída para não mexer no caminho padrão.
+    let mut signals = Signals::new([SIGINT, SIGTERM, SIGHUP, SIGQUIT])?;
+    std::thread::Builder::new()
+        .name("hog-signals-wake".to_string())
+        .spawn(move || {
+            for _ in signals.forever() {
+                // Marca antes de acordar: nada ordena esta thread e a do `watch_signals`.
+                quit.store(true, Ordering::Release);
+                wake();
             }
         })?;
     Ok(())

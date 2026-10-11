@@ -14,6 +14,13 @@ path = "src/main.rs"
 [features]
 # Medição 9: um item de menu que provoca pânico num handler de ação.
 panic-probe = []
+# Experimentos do custo de CPU com o app parado (branch exp/gpui-parado). Desligados, o app é o
+# da proto/gpui.
+# O tique de 10 Hz só roda tocando; fora disso, só o `wake` do controlador (e os sinais) acordam o
+# Store.
+exp-sem-poll = []
+# O display link do gpui_macos (vendorizado) para quando nenhum quadro é pedido.
+exp-display-link = ["dep:gpui_macos", "gpui_macos/exp-display-link"]
 
 [dependencies]
 futures.workspace = true
@@ -23,6 +30,9 @@ hog-audio.workspace = true
 hog-player-model = { path = "../model" }
 image.workspace = true
 signal-hook.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+gpui_macos = { workspace = true, optional = true }
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }

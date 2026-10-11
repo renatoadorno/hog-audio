@@ -381,6 +381,38 @@ fn o_poll_tica_a_cada_100_ms(cx: &mut TestAppContext) {
     assert_eq!((antes.as_str(), decorrido(cx).as_str()), ("0:01", "0:02"));
 }
 
+/// `exp-sem-poll`: pausado, o poll dorme depois do primeiro tique; o tique que vê o play (o do
+/// wake, aqui chamado à mão) o acorda.
+#[cfg(feature = "exp-sem-poll")]
+#[gpui::test]
+fn sem_poll_o_poll_dorme_pausado_e_volta_com_o_play(cx: &mut TestAppContext) {
+    let fake = carregada(PlayerState::Paused);
+    let store = store(cx, &fake);
+    let (_, woken) = wake_channel();
+    store.update(cx, |s, cx| s.start(woken, cx));
+    cx.run_until_parked();
+    let decorrido =
+        |cx: &mut TestAppContext| store.read_with(cx, |s, _| s.model().clock.elapsed.clone());
+
+    cx.executor().advance_clock(Duration::from_millis(100));
+    cx.run_until_parked();
+    fake.with(|s| s.decorrido = 2.0);
+    cx.executor().advance_clock(Duration::from_secs(1));
+    cx.run_until_parked();
+    let dormindo = decorrido(cx);
+
+    fake.with(|s| s.estado = PlayerState::Playing);
+    store.update(cx, |s, cx| s.tick(cx));
+    fake.with(|s| s.decorrido = 3.0);
+    cx.executor().advance_clock(Duration::from_millis(100));
+    cx.run_until_parked();
+
+    assert_eq!(
+        (dormindo.as_str(), decorrido(cx).as_str()),
+        ("0:01", "0:03")
+    );
+}
+
 #[gpui::test]
 fn espaco_toca(cx: &mut TestAppContext) {
     let fake = carregada(PlayerState::Loaded);
