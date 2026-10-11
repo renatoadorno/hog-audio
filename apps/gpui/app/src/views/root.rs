@@ -8,6 +8,7 @@ use hog_player_model::layout::{COLUMN_SPACING, PADDING, cover_side};
 
 use super::clock::ClockView;
 use super::cover::CoverView;
+use super::queue::QueueView;
 use super::status::StatusView;
 use super::technical::TechnicalView;
 use super::tooltip::tooltip;
@@ -28,6 +29,7 @@ pub struct RootView {
     volume: Entity<VolumeView>,
     technical: Entity<TechnicalView>,
     status: Entity<StatusView>,
+    queue: Entity<QueueView>,
     focus: FocusHandle,
     _error: Subscription,
 }
@@ -54,6 +56,7 @@ impl RootView {
             volume: cx.new(|cx| VolumeView::new(store.clone(), window, cx)),
             technical: cx.new(|cx| TechnicalView::new(store.clone(), cx)),
             status: cx.new(|cx| StatusView::new(store.clone(), cx)),
+            queue: cx.new(|cx| QueueView::new(store.clone(), cx)),
             store,
             focus,
             _error,
@@ -92,14 +95,8 @@ impl RootView {
         self.volume.clone().cached(sized(cover, VOLUME_HEIGHT))
     }
 
-    /// A fila entra na Task 7.
-    fn queue_slot(&self, width: f32, height: f32, palette: &Palette) -> Div {
-        div()
-            .debug_selector(|| "fila".to_string())
-            .w(px(width))
-            .h(px(height))
-            .rounded(px(12.0))
-            .bg(palette.panel)
+    fn queue_slot(&self, width: f32, height: f32) -> impl IntoElement {
+        self.queue.clone().cached(sized(width, height))
     }
 
     fn title_bar(&self, palette: &Palette) -> Div {
@@ -192,7 +189,7 @@ impl Render for RootView {
                                         .cached(sized(queue_width, STATUS_HEIGHT)),
                                 )
                             })
-                            .child(self.queue_slot(queue_width, queue_height, &palette)),
+                            .child(self.queue_slot(queue_width, queue_height)),
                     ),
             )
     }

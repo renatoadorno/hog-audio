@@ -35,6 +35,10 @@ pub const TITLE2: TypeStyle = TypeStyle {
     size: 17.0,
     line_height: 22.0,
 };
+pub const BODY: TypeStyle = TypeStyle {
+    size: 13.0,
+    line_height: 16.0,
+};
 pub const HEADLINE: TypeStyle = TypeStyle {
     size: 13.0,
     line_height: 16.0,

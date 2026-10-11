@@ -1,6 +1,7 @@
 pub mod clock;
 pub mod cover;
 pub mod icons;
+pub mod queue;
 pub mod root;
 pub mod status;
 pub mod technical;

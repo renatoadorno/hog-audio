@@ -16,6 +16,7 @@ use hog_player_gpui::theme::{
 };
 use hog_player_gpui::views::clock::ClockView;
 use hog_player_gpui::views::cover::CoverView;
+use hog_player_gpui::views::queue::QueueView;
 use hog_player_gpui::views::root::RootView;
 use hog_player_gpui::views::status::StatusView;
 use hog_player_gpui::views::technical::TechnicalView;
@@ -247,7 +248,7 @@ fn observar<V: 'static>(
 /// Cada view redesenha só com o sinal da parte do modelo que ela lê.
 #[gpui::test]
 fn cada_view_observa_so_o_seu_sinal(cx: &mut TestAppContext) {
-    const NOMES: [&str; 8] = [
+    const NOMES: [&str; 9] = [
         "capa",
         "faixa",
         "relogio",
@@ -255,6 +256,7 @@ fn cada_view_observa_so_o_seu_sinal(cx: &mut TestAppContext) {
         "tecnica",
         "aviso",
         "volume",
+        "fila",
         "raiz",
     ];
     let fake = FakePlayer::new();
@@ -269,6 +271,7 @@ fn cada_view_observa_so_o_seu_sinal(cx: &mut TestAppContext) {
     let transporte = cx.new(|cx| TransportView::new(store.clone(), cx));
     let tecnica = cx.new(|cx| TechnicalView::new(store.clone(), cx));
     let aviso = cx.new(|cx| StatusView::new(store.clone(), cx));
+    let fila = cx.new(|cx| QueueView::new(store.clone(), cx));
     observar(cx, &capa, &contas, 0);
     observar(cx, &faixa, &contas, 1);
     observar(cx, &relogio, &contas, 2);
@@ -276,7 +279,8 @@ fn cada_view_observa_so_o_seu_sinal(cx: &mut TestAppContext) {
     observar(cx, &tecnica, &contas, 4);
     observar(cx, &aviso, &contas, 5);
     observar(cx, &volume, &contas, 6);
-    observar(cx, &raiz, &contas, 7);
+    observar(cx, &fila, &contas, 7);
+    observar(cx, &raiz, &contas, 8);
 
     let signals = cx.update(|cx| store.read(cx).signals.clone());
     let mut visto = Vec::new();
@@ -306,8 +310,8 @@ fn cada_view_observa_so_o_seu_sinal(cx: &mut TestAppContext) {
         vec![
             ("display", vec!["capa", "faixa", "transporte", "tecnica"]),
             ("clock", vec!["relogio"]),
-            ("queue", vec![]),
-            ("entries", vec![]),
+            ("queue", vec!["fila"]),
+            ("entries", vec!["fila"]),
             ("volume", vec!["volume"]),
             ("error", vec!["aviso", "raiz"]),
         ]
@@ -918,4 +922,98 @@ fn arrastar_o_volume_nao_redesenha_a_view_irma_em_cache(cx: &mut TestAppContext)
 
     assert_eq!(casas(volume(window, &store)), 0.4);
     assert_eq!(renders.get(), 0);
+}
+
+#[gpui::test]
+fn clicar_numa_linha_seleciona_e_toca(cx: &mut TestAppContext) {
+    let fake = carregada(PlayerState::Loaded);
+    let store = store(cx, &fake);
+
+    store.update(cx, |s, cx| s.play_row(2, cx));
+    store.update(cx, |s, _| assert!(s.wait_idle(PRAZO)));
+
+    assert_eq!(store.read_with(cx, |s, _| s.selected()), Some(2));
+    assert!(fake.chamou("select"));
+    assert_eq!(fake.with(|s| s.indice_atual), Some(1));
+}
+
+#[gpui::test]
+fn a_selecao_acompanha_a_faixa_atual(cx: &mut TestAppContext) {
+    let fake = carregada(PlayerState::Playing);
+    let store = store(cx, &fake);
+    store.update(cx, |s, cx| s.tick(cx));
+    assert_eq!(store.read_with(cx, |s, _| s.selected()), Some(1));
+
+    fake.with(|s| s.indice_atual = Some(2));
+    store.update(cx, |s, cx| s.tick(cx));
+    assert_eq!(store.read_with(cx, |s, _| s.selected()), Some(3));
+}
+
+#[gpui::test]
+fn setas_movem_a_selecao_e_delete_remove_a_selecionada(cx: &mut TestAppContext) {
+    let fake = carregada(PlayerState::Loaded);
+    let store = store(cx, &fake);
+    cx.update(|cx| {
+        actions::bind(cx);
+        actions::register(&store, cx);
+    });
+    let (_root, window) = cx.add_window_view(|window, cx| RootView::new(store.clone(), window, cx));
+    store.update(window, |s, cx| s.tick(cx));
+
+    // Em dois passos: de 0, "down down up" com o sentido trocado também termina no id 2
+    // (0, 0 pelo limite, 0, 1).
+    window.simulate_keystrokes("down down");
+    assert_eq!(store.read_with(window, |s, _| s.selected()), Some(3));
+    window.simulate_keystrokes("up");
+    assert_eq!(store.read_with(window, |s, _| s.selected()), Some(2));
+
+    window.simulate_keystrokes("backspace");
+    store.update(window, |s, _| assert!(s.wait_idle(PRAZO)));
+
+    let ids: Vec<u64> = fake.with(|s| s.itens.iter().map(|i| i.id).collect());
+    assert_eq!(ids, [1, 3]);
+    assert_eq!(store.read_with(window, |s, _| s.selected()), None);
+}
+
+/// A raiz inteira numa janela de teste, com a fila e as linhas já lidas. As posições saem do
+/// primeiro quadro: o quadro que reaproveita uma view em cache não repõe o `debug_bounds`.
+fn fila_na_janela(
+    cx: &mut TestAppContext,
+) -> (Arc<FakePlayer>, Entity<Store>, &mut VisualTestContext) {
+    let (fake, store) = assentada(cx, PlayerState::Loaded);
+    let (_root, window) = cx.add_window_view(|window, cx| RootView::new(store.clone(), window, cx));
+    window.run_until_parked();
+    (fake, store, window)
+}
+
+#[gpui::test]
+fn clicar_numa_linha_da_janela_seleciona_e_toca(cx: &mut TestAppContext) {
+    let (fake, store, window) = fila_na_janela(cx);
+    assert_eq!(store.read_with(window, |s, _| s.selected()), Some(1));
+    let linha = window.debug_bounds("linha-2").expect("linha-2");
+
+    window.simulate_click(linha.center(), Modifiers::none());
+    store.update(window, |s, _| assert!(s.wait_idle(PRAZO)));
+
+    assert_eq!(store.read_with(window, |s, _| s.selected()), Some(2));
+    assert!(fake.chamou("select"));
+    assert_eq!(fake.with(|s| s.indice_atual), Some(1));
+}
+
+#[gpui::test]
+fn clicar_em_limpar_esvazia_a_fila(cx: &mut TestAppContext) {
+    let (fake, store, window) = fila_na_janela(cx);
+    let limpar = window.debug_bounds("limpar").expect("limpar");
+
+    window.simulate_click(limpar.center(), Modifiers::none());
+    store.update(window, |s, _| assert!(s.wait_idle(PRAZO)));
+    let esvaziou = tique_ate(window, &store, |s| s.model().queue.items.is_empty());
+    window.run_until_parked();
+
+    assert!(fake.with(|s| s.itens.is_empty()));
+    assert!(esvaziou);
+    assert!(
+        window.debug_bounds("fila-vazia").is_some(),
+        "a fila não mostrou o estado vazio"
+    );
 }
