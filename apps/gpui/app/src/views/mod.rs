@@ -1,3 +1,4 @@
+pub mod backdrop;
 pub mod clock;
 pub mod cover;
 pub mod icons;

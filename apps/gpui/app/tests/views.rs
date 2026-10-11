@@ -4,9 +4,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    AnyView, AppContext, Bounds, Context, Entity, InteractiveElement, IntoElement, Modifiers,
-    MouseButton, ParentElement, Pixels, Point, Render, StyleRefinement, Styled, TestAppContext,
-    VisualTestContext, Window, div, point, px, size,
+    AnyView, AppContext, Bounds, Context, Entity, ExternalPaths, FileDropEvent, InteractiveElement,
+    IntoElement, Modifiers, MouseButton, ParentElement, Pixels, Point, Render, StyleRefinement,
+    Styled, TestAppContext, VisualTestContext, Window, div, point, px, size,
 };
 use hog_audio::transitions::PlayerState;
 use hog_player_gpui::actions;
@@ -14,6 +14,7 @@ use hog_player_gpui::store::{Signal, Store, wake_channel};
 use hog_player_gpui::theme::{
     CLOCK_HEIGHT, STATUS_GAP, STATUS_HEIGHT, TECHNICAL_HEIGHT, TITLE_BLOCK, VOLUME_HEIGHT,
 };
+use hog_player_gpui::views::backdrop::BackdropView;
 use hog_player_gpui::views::clock::ClockView;
 use hog_player_gpui::views::cover::CoverView;
 use hog_player_gpui::views::queue::QueueView;
@@ -25,7 +26,7 @@ use hog_player_gpui::views::transport::TransportView;
 use hog_player_gpui::views::volume::VolumeView;
 use hog_player_model::controller::Config;
 use hog_player_model::entry::QueueEntryInfo;
-use hog_player_model::metadata::TrackMetadata;
+use hog_player_model::metadata::{TrackMetadata, load_track_metadata};
 use hog_player_testing::{FakePlayer, PRAZO, config_de_teste, entrada, itens, pasta_com};
 
 #[gpui::test]
@@ -248,8 +249,9 @@ fn observar<V: 'static>(
 /// Cada view redesenha só com o sinal da parte do modelo que ela lê.
 #[gpui::test]
 fn cada_view_observa_so_o_seu_sinal(cx: &mut TestAppContext) {
-    const NOMES: [&str; 9] = [
+    const NOMES: [&str; 10] = [
         "capa",
+        "fundo",
         "faixa",
         "relogio",
         "transporte",
@@ -266,6 +268,7 @@ fn cada_view_observa_so_o_seu_sinal(cx: &mut TestAppContext) {
     let volume =
         janela.update(|window, cx| cx.new(|cx| VolumeView::new(store.clone(), window, cx)));
     let capa = cx.new(|cx| CoverView::new(store.clone(), cx));
+    let fundo = cx.new(|cx| BackdropView::new(store.clone(), cx));
     let faixa = cx.new(|cx| TrackInfoView::new(store.clone(), cx));
     let relogio = cx.new(|cx| ClockView::new(store.clone(), cx));
     let transporte = cx.new(|cx| TransportView::new(store.clone(), cx));
@@ -273,14 +276,15 @@ fn cada_view_observa_so_o_seu_sinal(cx: &mut TestAppContext) {
     let aviso = cx.new(|cx| StatusView::new(store.clone(), cx));
     let fila = cx.new(|cx| QueueView::new(store.clone(), cx));
     observar(cx, &capa, &contas, 0);
-    observar(cx, &faixa, &contas, 1);
-    observar(cx, &relogio, &contas, 2);
-    observar(cx, &transporte, &contas, 3);
-    observar(cx, &tecnica, &contas, 4);
-    observar(cx, &aviso, &contas, 5);
-    observar(cx, &volume, &contas, 6);
-    observar(cx, &fila, &contas, 7);
-    observar(cx, &raiz, &contas, 8);
+    observar(cx, &fundo, &contas, 1);
+    observar(cx, &faixa, &contas, 2);
+    observar(cx, &relogio, &contas, 3);
+    observar(cx, &transporte, &contas, 4);
+    observar(cx, &tecnica, &contas, 5);
+    observar(cx, &aviso, &contas, 6);
+    observar(cx, &volume, &contas, 7);
+    observar(cx, &fila, &contas, 8);
+    observar(cx, &raiz, &contas, 9);
 
     let signals = cx.update(|cx| store.read(cx).signals.clone());
     let mut visto = Vec::new();
@@ -308,7 +312,10 @@ fn cada_view_observa_so_o_seu_sinal(cx: &mut TestAppContext) {
     assert_eq!(
         visto,
         vec![
-            ("display", vec!["capa", "faixa", "transporte", "tecnica"]),
+            (
+                "display",
+                vec!["capa", "fundo", "faixa", "transporte", "tecnica"]
+            ),
             ("clock", vec!["relogio"]),
             ("queue", vec!["fila"]),
             ("entries", vec!["fila"]),
@@ -410,6 +417,102 @@ fn cmd_o_abre_o_painel_e_acrescenta_o_que_foi_escolhido(cx: &mut TestAppContext)
 
     assert_eq!(fake.with(|s| s.itens.len()), 1);
     std::fs::remove_dir_all(pasta).unwrap();
+}
+
+#[gpui::test]
+fn soltar_arquivos_na_janela_acrescenta_a_fila(cx: &mut TestAppContext) {
+    let pasta = pasta_com("soltar-janela", &["a.flac", "b.flac"]);
+    let fake = FakePlayer::new();
+    let store = store(cx, &fake);
+    let (root, window) = cx.add_window_view(|window, cx| RootView::new(store.clone(), window, cx));
+
+    root.update(window, |root, cx| root.accept_drop(vec![pasta.clone()], cx));
+    store.update(window, |s, _| assert!(s.wait_idle(PRAZO)));
+
+    assert_eq!(fake.with(|s| s.itens.len()), 2);
+    std::fs::remove_dir_all(pasta).unwrap();
+}
+
+/// O arrasto do Finder pela fiação do GPUI: o `Entered` abre o drag com os caminhos e o `Submit`
+/// vira o mouse-up que chega ao `on_drop` da raiz.
+#[gpui::test]
+fn soltar_do_finder_sobre_a_janela_acrescenta_a_fila(cx: &mut TestAppContext) {
+    let pasta = pasta_com("soltar-finder", &["a.flac", "b.flac"]);
+    let fake = FakePlayer::new();
+    let store = store(cx, &fake);
+    let (_root, window) = cx.add_window_view(|window, cx| RootView::new(store.clone(), window, cx));
+    window.run_until_parked();
+    let onde = window
+        .debug_bounds("fila-vazia")
+        .expect("fila-vazia")
+        .center();
+
+    window.simulate_event(FileDropEvent::Entered {
+        position: onde,
+        paths: ExternalPaths([pasta.clone()].into_iter().collect()),
+    });
+    window.simulate_event(FileDropEvent::Submit { position: onde });
+    store.update(window, |s, _| assert!(s.wait_idle(PRAZO)));
+
+    assert_eq!(fake.with(|s| s.itens.len()), 2);
+    assert!(!window.read(|cx| cx.has_active_drag()));
+    std::fs::remove_dir_all(pasta).unwrap();
+}
+
+/// Caminho de uma fixture de `testdata/` na raiz do repositório. Reprova se ela não existir.
+fn fixture(nome: &str) -> String {
+    let caminho = format!("{}/../../../testdata/{nome}", env!("CARGO_MANIFEST_DIR"));
+    assert!(
+        std::path::Path::new(&caminho).exists(),
+        "fixture ausente: {caminho}\nrode `make fixtures` na raiz do repositório"
+    );
+    caminho
+}
+
+/// Quais dos dois ramos da capa o último quadro desenhou: (imagem, placeholder).
+fn ramos_da_capa(window: &mut VisualTestContext) -> (bool, bool) {
+    (
+        window.debug_bounds("capa-imagem").is_some(),
+        window.debug_bounds("capa-vazia").is_some(),
+    )
+}
+
+/// A arte vem do leitor de verdade, numa faixa com capa: é o caminho do app.
+#[gpui::test]
+fn a_capa_mostra_a_imagem_com_arte_e_o_placeholder_sem(cx: &mut TestAppContext) {
+    let faixa = fixture("meta_fixture.flac");
+    let fake = FakePlayer::new();
+    fake.with(|s| {
+        s.itens = itens(&[&faixa]);
+        s.indice_atual = Some(0);
+        s.versao_fila = 1;
+        s.estado = PlayerState::Loaded;
+    });
+    let store = store_com(
+        cx,
+        &fake,
+        Config {
+            load_metadata: Arc::new(load_track_metadata),
+            ..config_de_teste()
+        },
+    );
+    let (_root, window) = cx.add_window_view(|window, cx| RootView::new(store.clone(), window, cx));
+    window.run_until_parked();
+    let sem_arte = ramos_da_capa(window);
+
+    store.update(window, |s, cx| s.play_row(1, cx));
+    let chegou = tique_ate(window, &store, |s| s.model().display.artwork.is_some());
+    window.run_until_parked();
+    let com_arte = ramos_da_capa(window);
+
+    assert!(chegou, "a arte não chegou ao modelo");
+    assert_eq!((sem_arte, com_arte), ((false, true), (true, false)));
+    let coluna = window.debug_bounds("coluna").expect("coluna");
+    let imagem = window.debug_bounds("capa-imagem").expect("capa-imagem");
+    assert!(
+        imagem.size.width >= coluna.size.width - px(2.0),
+        "a capa não ocupa a coluna: {imagem:?} em {coluna:?}"
+    );
 }
 
 /// Sem cache e sem altura imposta, cada view ocupa o que o conteúdo dela pede. É essa altura

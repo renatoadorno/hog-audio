@@ -1,11 +1,14 @@
+use std::path::PathBuf;
+
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    AppContext, Context, Div, Entity, FocusHandle, InteractiveElement, IntoElement, ParentElement,
-    Render, StatefulInteractiveElement, StyleRefinement, Styled, Subscription, Window, div, px,
-    svg,
+    AppContext, Context, Div, Entity, ExternalPaths, FocusHandle, InteractiveElement, IntoElement,
+    ParentElement, Render, StatefulInteractiveElement, StyleRefinement, Styled, Subscription,
+    Window, div, px, rgba, svg,
 };
 use hog_player_model::layout::{COLUMN_SPACING, PADDING, cover_side};
 
+use super::backdrop::BackdropView;
 use super::clock::ClockView;
 use super::cover::CoverView;
 use super::queue::QueueView;
@@ -22,6 +25,7 @@ use crate::theme::*;
 
 pub struct RootView {
     store: Entity<Store>,
+    backdrop: Entity<BackdropView>,
     cover: Entity<CoverView>,
     track_info: Entity<TrackInfoView>,
     clock: Entity<ClockView>,
@@ -49,6 +53,7 @@ impl RootView {
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
         Self {
+            backdrop: cx.new(|cx| BackdropView::new(store.clone(), cx)),
             cover: cx.new(|cx| CoverView::new(store.clone(), cx)),
             track_info: cx.new(|cx| TrackInfoView::new(store.clone(), cx)),
             clock: cx.new(|cx| ClockView::new(store.clone(), cx)),
@@ -61,6 +66,12 @@ impl RootView {
             focus,
             _error,
         }
+    }
+
+    /// Soltar do Finder: o controlador expande pastas e filtra o que não é áudio.
+    pub fn accept_drop(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        self.store.update(cx, |s, _| s.add(paths));
+        cx.notify();
     }
 
     fn left_column(&self, cover: f32) -> Div {
@@ -160,6 +171,17 @@ impl Render for RootView {
             .font_family(FONT)
             .bg(palette.background)
             .text_color(palette.foreground)
+            .child(
+                self.backdrop
+                    .clone()
+                    .cached(StyleRefinement::default().absolute().size_full()),
+            )
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
+                this.accept_drop(paths.paths().to_vec(), cx);
+            }))
+            .drag_over::<ExternalPaths>(|style, _, _, _| {
+                style.border_3().border_color(rgba(0xfa6112e6))
+            })
             .child(self.title_bar(&palette))
             .child(
                 div()
