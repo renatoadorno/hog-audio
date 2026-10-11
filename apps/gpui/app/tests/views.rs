@@ -18,7 +18,7 @@ use hog_player_gpui::views::backdrop::BackdropView;
 use hog_player_gpui::views::clock::ClockView;
 use hog_player_gpui::views::cover::CoverView;
 use hog_player_gpui::views::queue::QueueView;
-use hog_player_gpui::views::root::RootView;
+use hog_player_gpui::views::root::{RootView, slot};
 use hog_player_gpui::views::status::StatusView;
 use hog_player_gpui::views::technical::TechnicalView;
 use hog_player_gpui::views::track_info::TrackInfoView;
@@ -1003,12 +1003,12 @@ struct VolumeComIrma {
 
 impl Render for VolumeComIrma {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        let slot = |altura: f32| StyleRefinement::default().w(px(320.0)).h(px(altura));
+        let tamanho = |altura: f32| StyleRefinement::default().w(px(320.0)).h(px(altura));
         div()
             .flex()
             .flex_col()
-            .child(self.irma.clone().cached(slot(40.0)))
-            .child(self.volume.clone().cached(slot(VOLUME_HEIGHT)))
+            .child(self.irma.clone().cached(tamanho(40.0)))
+            .child(self.volume.clone().cached(tamanho(VOLUME_HEIGHT)))
     }
 }
 
@@ -1033,6 +1033,75 @@ fn arrastar_o_volume_nao_redesenha_a_view_irma_em_cache(cx: &mut TestAppContext)
 
     assert_eq!(casas(volume(window, &store)), 0.4);
     assert_eq!(renders.get(), 0);
+}
+
+/// Uma view que conta os desenhos e se deixa medir pelo nome.
+struct Medida {
+    nome: &'static str,
+    desenhos: Rc<Cell<u32>>,
+}
+
+impl Render for Medida {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        self.desenhos.set(self.desenhos.get() + 1);
+        let nome = self.nome;
+        div().debug_selector(move || nome.to_string()).size_full()
+    }
+}
+
+/// Duas views nos slots da raiz, uma embaixo da outra, com ou sem cache.
+struct DuasNoSlot {
+    cached: bool,
+    notificada: Entity<Medida>,
+    irma: Entity<Medida>,
+}
+
+impl Render for DuasNoSlot {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let tamanho = || StyleRefinement::default().w(px(320.0)).h(px(40.0));
+        div()
+            .flex()
+            .flex_col()
+            .child(slot(&self.notificada, tamanho(), self.cached))
+            .child(slot(&self.irma, tamanho(), self.cached))
+    }
+}
+
+/// Notifica uma das views e devolve quantas vezes a irmã redesenhou e onde ela ficou.
+fn notificar_a_vizinha(cx: &mut TestAppContext, cached: bool) -> (u32, Bounds<Pixels>) {
+    let desenhos = Rc::new(Cell::new(0));
+    let (raiz, window) = cx.add_window_view(|_, cx| DuasNoSlot {
+        cached,
+        notificada: cx.new(|_| Medida {
+            nome: "notificada",
+            desenhos: Rc::default(),
+        }),
+        irma: cx.new(|_| Medida {
+            nome: "irma",
+            desenhos: desenhos.clone(),
+        }),
+    });
+    window.run_until_parked();
+    let lugar = window.debug_bounds("irma").expect("irma");
+    desenhos.set(0);
+    let notificada = raiz.read_with(window, |raiz, _| raiz.notificada.clone());
+    notificada.update(window, |_, cx| cx.notify());
+    window.run_until_parked();
+    (desenhos.get(), lugar)
+}
+
+/// Com a acessibilidade ligada a raiz põe as views sem cache, porque a view em cache
+/// reaproveitada não repõe os nós do AccessKit. Sem cache, a irmã redesenha (e repõe os nós)
+/// em todo quadro, no mesmo lugar e tamanho do slot em cache.
+#[gpui::test]
+fn sem_cache_a_view_redesenha_com_a_vizinha_no_mesmo_lugar(cx: &mut TestAppContext) {
+    let (em_cache, lugar_em_cache) = notificar_a_vizinha(cx, true);
+    let (sem_cache, lugar_sem_cache) = notificar_a_vizinha(cx, false);
+
+    assert_eq!(em_cache, 0);
+    assert!(sem_cache > 0, "a irmã sem cache não redesenhou");
+    assert_eq!(lugar_sem_cache, lugar_em_cache);
+    assert_eq!(lugar_em_cache.size, size(px(320.0), px(40.0)));
 }
 
 #[gpui::test]

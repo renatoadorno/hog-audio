@@ -2,9 +2,9 @@ use std::path::PathBuf;
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    AppContext, Context, Div, Entity, ExternalPaths, FocusHandle, InteractiveElement, IntoElement,
-    ParentElement, Render, Role, StatefulInteractiveElement, StyleRefinement, Styled, Subscription,
-    Window, div, px, rgba, svg,
+    AnyElement, AppContext, Context, Div, Entity, ExternalPaths, FocusHandle, InteractiveElement,
+    IntoElement, ParentElement, Render, Role, StatefulInteractiveElement, StyleRefinement, Styled,
+    Subscription, Window, div, px, rgba, svg,
 };
 use hog_player_model::layout::{COLUMN_SPACING, PADDING, cover_side};
 
@@ -43,6 +43,19 @@ fn sized(width: f32, height: f32) -> StyleRefinement {
     StyleRefinement::default().w(px(width)).h(px(height))
 }
 
+/// Uma view filha da raiz, posta em `style`. Sem cache, ela vai num contêiner com o mesmo estilo,
+/// para o layout não mudar. A raiz tira o cache com a acessibilidade ligada: no GPUI v1.21, a view
+/// em cache reaproveitada (`Window::reuse_prepaint`) não repõe os nós do AccessKit, e eles somem
+/// da árvore no primeiro quadro em que ela não redesenha.
+pub fn slot<V: Render>(view: &Entity<V>, style: StyleRefinement, cached: bool) -> AnyElement {
+    if cached {
+        return view.clone().cached(style).into_any_element();
+    }
+    let mut container = div();
+    *container.style() = style;
+    container.child(view.clone()).into_any_element()
+}
+
 fn spacer(height: f32) -> Div {
     div().h(px(height)).flex_shrink_0()
 }
@@ -74,40 +87,40 @@ impl RootView {
         cx.notify();
     }
 
-    fn left_column(&self, cover: f32) -> Div {
+    fn left_column(&self, cover: f32, cached: bool) -> Div {
         div()
             .debug_selector(|| "coluna".to_string())
             .w(px(cover))
             .flex_shrink_0()
             .flex()
             .flex_col()
-            .child(self.cover.clone().cached(sized(cover, cover)))
+            .child(slot(&self.cover, sized(cover, cover), cached))
             .child(spacer(GAP))
-            .child(self.track_info.clone().cached(sized(cover, TITLE_BLOCK)))
+            .child(slot(&self.track_info, sized(cover, TITLE_BLOCK), cached))
             .child(spacer(GAP))
-            .child(self.clock.clone().cached(sized(cover, CLOCK_HEIGHT)))
+            .child(slot(&self.clock, sized(cover, CLOCK_HEIGHT), cached))
             .child(spacer(GAP))
-            .child(
-                self.transport
-                    .clone()
-                    .cached(sized(cover, TRANSPORT_HEIGHT)),
-            )
+            .child(slot(
+                &self.transport,
+                sized(cover, TRANSPORT_HEIGHT),
+                cached,
+            ))
             .child(spacer(GAP))
-            .child(self.volume_slot(cover))
+            .child(self.volume_slot(cover, cached))
             .child(spacer(TECHNICAL_GAP))
-            .child(
-                self.technical
-                    .clone()
-                    .cached(sized(cover, TECHNICAL_HEIGHT)),
-            )
+            .child(slot(
+                &self.technical,
+                sized(cover, TECHNICAL_HEIGHT),
+                cached,
+            ))
     }
 
-    fn volume_slot(&self, cover: f32) -> impl IntoElement {
-        self.volume.clone().cached(sized(cover, VOLUME_HEIGHT))
+    fn volume_slot(&self, cover: f32, cached: bool) -> AnyElement {
+        slot(&self.volume, sized(cover, VOLUME_HEIGHT), cached)
     }
 
-    fn queue_slot(&self, width: f32, height: f32) -> impl IntoElement {
-        self.queue.clone().cached(sized(width, height))
+    fn queue_slot(&self, width: f32, height: f32, cached: bool) -> AnyElement {
+        slot(&self.queue, sized(width, height), cached)
     }
 
     fn title_bar(&self, palette: &Palette) -> Div {
@@ -163,6 +176,12 @@ impl Render for RootView {
         };
         let queue_width = width - 2.0 * PADDING - COLUMN_SPACING - cover;
         let queue_height = height - 2.0 * PADDING - status;
+        // A ativação força um quadro completo (`window.rs` do gpui, task que chama `refresh`). No
+        // macOS ela é pegajosa: o primeiro pedido de qualquer cliente AX ativa
+        // (`accesskit_macos` 0.26.3, `subclass.rs`) e o `gpui_macos` descarta a desativação
+        // (`a11y_init`). Daí em diante a janela segue sem cache até fechar, então medir desempenho
+        // pede relançar o app depois de usar uma ferramenta de acessibilidade.
+        let cached = !window.is_a11y_active();
 
         div()
             .id("raiz")
@@ -173,11 +192,11 @@ impl Render for RootView {
             .font_family(FONT)
             .bg(palette.background)
             .text_color(palette.foreground)
-            .child(
-                self.backdrop
-                    .clone()
-                    .cached(StyleRefinement::default().absolute().size_full()),
-            )
+            .child(slot(
+                &self.backdrop,
+                StyleRefinement::default().absolute().size_full(),
+                cached,
+            ))
             .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
                 this.accept_drop(paths.paths().to_vec(), cx);
             }))
@@ -196,7 +215,7 @@ impl Render for RootView {
                     .flex()
                     .flex_row()
                     .gap(px(COLUMN_SPACING))
-                    .child(self.left_column(cover))
+                    .child(self.left_column(cover, cached))
                     .child(
                         div()
                             .w(px(queue_width))
@@ -207,13 +226,13 @@ impl Render for RootView {
                             // Sem erro não entra nada: um filho vazio ainda levaria o `gap`
                             // e desceria a fila.
                             .when(has_error, |c| {
-                                c.child(
-                                    self.status
-                                        .clone()
-                                        .cached(sized(queue_width, STATUS_HEIGHT)),
-                                )
+                                c.child(slot(
+                                    &self.status,
+                                    sized(queue_width, STATUS_HEIGHT),
+                                    cached,
+                                ))
                             })
-                            .child(self.queue_slot(queue_width, queue_height)),
+                            .child(self.queue_slot(queue_width, queue_height, cached)),
                     ),
             )
     }
