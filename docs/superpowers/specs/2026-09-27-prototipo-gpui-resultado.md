@@ -4,7 +4,7 @@ Data: 2026-10-11
 Spec: `docs/superpowers/specs/2026-09-27-prototipo-gpui-design.md`
 Plano: `docs/superpowers/plans/2026-09-27-prototipo-gpui.md`
 Medições brutas: `docs/superpowers/specs/2026-09-27-prototipo-gpui-medicoes.md`
-Estado: na branch `proto/gpui`, commitado; sem push.
+Estado: branch `proto/gpui`, com o experimento, mesclada na `main` local em 11/10/2026; sem push.
 
 ## Veredito
 
@@ -46,9 +46,10 @@ parado é, na maior parte, do GPUI e não do protótipo. Os números estão na s
 
 ## Experimento: de onde vem o custo parado
 
-Feito depois do veredito, a pedido do usuário. Fica na branch `exp/gpui-parado` (309d9d9), numa
-worktree; a `proto/gpui` não foi tocada. Os números brutos estão na seção "Experimento" das
-medições.
+Feito depois do veredito, a pedido do usuário. Foi medido na branch `exp/gpui-parado` (309d9d9)
+e depois mesclado na `proto/gpui` a pedido do usuário. Cada variante fica atrás de uma feature
+do `hog-player-gpui`: `exp-sem-poll` e `exp-display-link`. Sem as features, o build é a base.
+Os números brutos estão na seção "Experimento" das medições.
 
 Quatro variantes do protótipo:
 - **base:** o código desta branch;
@@ -100,8 +101,9 @@ patch é decisão do usuário, e o patch traz custos:
 - sem o poll, a suspeita de device perdido, o problema novo do engine e o volume mudado por fora
   com o player pausado esperam o próximo comando;
 - no ProMotion, perde-se o `present` sustentado por 1 s depois de entrada rápida;
-- o patch não entra na `proto/gpui` como está, porque o `[patch]` do Cargo vale para o workspace
-  inteiro.
+- o `[patch]` do Cargo vale para o workspace inteiro, então o `gpui_macos` sempre vem de
+  `apps/gpui/vendor/`, mesmo sem a feature. Sem ela, o código vendorizado é o da tag. Trocar de
+  tag exige trocar a cópia junto.
 
 ## O que foi construído
 

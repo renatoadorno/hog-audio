@@ -217,8 +217,8 @@ Depurar › Provocar pânico.
 ## Experimento: sem o poll e com o display link parado
 
 Feito depois do resultado, a pedido do usuário, para separar o custo do app do custo do GPUI.
-Branch `exp/gpui-parado` (commit 309d9d9, a partir de e197121), numa worktree; a `proto/gpui`
-não foi tocada. Quatro variantes do mesmo protótipo:
+Medido na branch `exp/gpui-parado` (commit 309d9d9, a partir de e197121), numa worktree. Ela foi
+mesclada na `proto/gpui` depois das medições. Quatro variantes do mesmo protótipo:
 
 - **base:** o código da `proto/gpui`, com o GPUI da tag.
 - **sem-poll:** o poll de 10 Hz só roda tocando. Parado, o `Store` dorme e acorda por comando,
