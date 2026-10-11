@@ -78,6 +78,10 @@ pub struct FakeState {
     /// Depois do `shutdown`, o dublê recusa o volume como o core e conta quem ainda tentou.
     pub encerrado: bool,
     pub volume_depois_do_shutdown: usize,
+    /// Segura o `shutdown`: o engine travado que o panic hook não pode esperar para sempre.
+    pub portao_do_shutdown: Option<Arc<Gate>>,
+    /// O `shutdown` entra em pânico depois de registrar a chamada: a restauração que cai.
+    pub panico_no_shutdown: bool,
     pub itens: Vec<Item>,
     pub indice_atual: Option<u32>,
     pub versao_fila: u64,
@@ -119,6 +123,8 @@ impl Default for FakeState {
             volume_esperando: false,
             encerrado: false,
             volume_depois_do_shutdown: 0,
+            portao_do_shutdown: None,
+            panico_no_shutdown: false,
             itens: Vec::new(),
             indice_atual: None,
             versao_fila: 0,
@@ -455,9 +461,18 @@ impl Player for FakePlayer {
     }
 
     fn shutdown(&self) -> Result<(), PlayerError> {
-        let mut s = self.lock();
-        s.chamadas.push("shutdown".to_string());
-        s.encerrado = true;
+        let (portao, panico) = {
+            let mut s = self.lock();
+            s.chamadas.push("shutdown".to_string());
+            s.encerrado = true;
+            (s.portao_do_shutdown.clone(), s.panico_no_shutdown)
+        };
+        if let Some(portao) = portao {
+            portao.wait();
+        }
+        if panico {
+            panic!("pânico dentro do shutdown");
+        }
         Ok(())
     }
 }

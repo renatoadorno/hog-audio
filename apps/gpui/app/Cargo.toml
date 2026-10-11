@@ -11,6 +11,10 @@ path = "src/lib.rs"
 name = "hog-player-gpui"
 path = "src/main.rs"
 
+[features]
+# Medição 9: um item de menu que provoca pânico num handler de ação.
+panic-probe = []
+
 [dependencies]
 futures.workspace = true
 gpui.workspace = true

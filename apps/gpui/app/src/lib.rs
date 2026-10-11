@@ -2,6 +2,7 @@
 //! de reprodução mora aqui.
 
 pub mod actions;
+pub mod exit;
 pub mod images;
 pub mod store;
 pub mod theme;
