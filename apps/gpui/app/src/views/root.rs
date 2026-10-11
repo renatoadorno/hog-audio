@@ -81,10 +81,10 @@ impl RootView {
         }
     }
 
-    /// Soltar do Finder: o controlador expande pastas e filtra o que não é áudio.
+    /// Soltar do Finder: o controlador expande pastas e filtra o que não é áudio. A fila nova
+    /// chega pelo tique, com os sinais da fila e das linhas.
     pub fn accept_drop(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
         self.store.update(cx, |s, _| s.add(paths));
-        cx.notify();
     }
 
     fn left_column(&self, cover: f32, cached: bool) -> Div {

@@ -203,6 +203,11 @@ impl Store {
 
     /// Publica na hora: o slider não espera o core.
     pub fn apply_volume(&mut self, value: f64, cx: &mut Context<Self>) {
+        // O `SetValue` do VoiceOver traz o número do cliente, e o `clamp` devolve NaN para NaN: o
+        // core persistiria o pedido e o reaplicaria em toda aquisição.
+        if !value.is_finite() {
+            return;
+        }
         self.controller.apply_volume(value.clamp(0.0, 1.0));
         Self::notify(&self.signals.volume, cx);
     }

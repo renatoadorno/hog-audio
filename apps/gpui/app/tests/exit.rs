@@ -1,6 +1,7 @@
+use std::io::{ErrorKind, Read, Write};
 use std::os::unix::process::ExitStatusExt;
 use std::path::PathBuf;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, mpsc};
 use std::time::{Duration, Instant};
@@ -118,10 +119,21 @@ fn a_repeticao_so_vira_emergencia_depois_de_1_s() {
 /// Roda um dos testes `filho_*` deste binário num processo à parte: a saída de emergência de
 /// verdade mata o processo, e o deste binário não pode morrer.
 fn filho(teste: &str) -> Output {
-    Command::new(std::env::current_exe().expect("binário de teste"))
-        .args([teste, "--exact", "--ignored", "--nocapture"])
-        .output()
-        .expect("processo filho")
+    comando_do_filho(teste).output().expect("processo filho")
+}
+
+fn comando_do_filho(teste: &str) -> Command {
+    let mut comando = Command::new(std::env::current_exe().expect("binário de teste"));
+    comando.args([teste, "--exact", "--ignored", "--nocapture"]);
+    comando
+}
+
+/// O `--exact` com um nome que não existe roda zero testes e sai com 0: sem a contagem, um filho
+/// renomeado passaria sem rodar nada.
+fn passou_sozinho(saida: &Output) {
+    let stdout = String::from_utf8_lossy(&saida.stdout);
+    assert!(saida.status.success(), "{:?}\n{stdout}", saida.status);
+    assert!(stdout.contains("1 passed"), "o filho não rodou: {stdout}");
 }
 
 /// Dois sinais com `watch_signals` de verdade, o segundo `intervalo` depois de o primeiro ligar
@@ -158,8 +170,7 @@ fn filho_sigterm_em_menos_de_1_s() {
 
 #[test]
 fn o_sigterm_repetido_em_menos_de_1_s_nao_encerra() {
-    let status = filho("filho_sigterm_em_menos_de_1_s").status;
-    assert!(status.success(), "{status:?}");
+    passou_sozinho(&filho("filho_sigterm_em_menos_de_1_s"));
 }
 
 /// Fechar a aba do terminal: dois SIGHUP. O intervalo passa de 1 s de propósito, para que só a
@@ -172,8 +183,7 @@ fn filho_dois_sighup() {
 
 #[test]
 fn dois_sighup_nao_encerram_o_processo() {
-    let status = filho("filho_dois_sighup").status;
-    assert!(status.success(), "{status:?}");
+    passou_sozinho(&filho("filho_dois_sighup"));
 }
 
 #[test]
@@ -190,9 +200,51 @@ fn log_sem_arquivo_avisa_uma_vez_no_stderr() {
     let saida = filho("filho_log_sem_arquivo");
     let stderr = String::from_utf8_lossy(&saida.stderr);
 
-    assert!(saida.status.success(), "{:?}", saida.status);
+    passou_sozinho(&saida);
     assert_eq!(stderr.matches("não abri").count(), 1, "{stderr}");
     assert!(stderr.contains("linha dois"), "{stderr}");
+}
+
+#[test]
+#[ignore = "roda só como processo filho de o_terminal_fechado_nao_derruba_o_log"]
+fn filho_log_com_stderr_quebrado() {
+    // O pai fecha a ponta de leitura do stderr antes de soltar o stdin.
+    std::io::stdin()
+        .read_to_end(&mut Vec::new())
+        .expect("stdin do pai");
+    let quebrado = std::io::stderr().write_all(b"sonda\n");
+    assert_eq!(
+        quebrado.map_err(|e| e.kind()),
+        Err(ErrorKind::BrokenPipe),
+        "a montagem não quebrou o stderr"
+    );
+    println!("stderr quebrado");
+
+    // Sem arquivo: o aviso de não ter aberto e a linha vão só para o stderr quebrado.
+    let log = transition_log(Some(PathBuf::from("/hog-gpui-pasta-que-nao-existe/x.log")));
+    log("linha com o terminal fechado");
+}
+
+/// Fechar o terminal deixa o stderr sem leitor (EPIPE). O log roda no `tick()`, na main, e no
+/// panic hook, onde um pânico vira abort: escrever no stderr não pode entrar em pânico.
+#[test]
+fn o_terminal_fechado_nao_derruba_o_log() {
+    let mut filho = comando_do_filho("filho_log_com_stderr_quebrado")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("processo filho");
+
+    drop(filho.stderr.take());
+    drop(filho.stdin.take());
+    let saida = filho.wait_with_output().expect("saída do filho");
+
+    assert!(
+        String::from_utf8_lossy(&saida.stdout).contains("stderr quebrado"),
+        "a montagem não quebrou o stderr"
+    );
+    passou_sozinho(&saida);
 }
 
 /// O panic hook é global ao processo: quem o instala roda sozinho e devolve o hook padrão no fim.

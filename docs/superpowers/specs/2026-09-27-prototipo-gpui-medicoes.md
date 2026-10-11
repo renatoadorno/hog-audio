@@ -90,16 +90,31 @@ IOProc), que é o mesmo. O protótipo tem média e picos maiores e uns 10 a 15 M
 Footprint nos três momentos do protocolo, com a biblioteca de 221 faixas.
 
 - Logo depois de abrir, vazio: protótipo 32 a 33 MB; controle 31 a 32 MB.
-- Com a fila carregada (só as linhas visíveis são lidas nos dois apps): protótipo 117 e 122 MB;
-  controle 78 e 82 MB.
+- Com a fila carregada: protótipo 117 e 122 MB; controle 78 e 82 MB. Os dois apps leem todas
+  as linhas da fila, não só as visíveis: na ordem da fila, quatro por vez (`EntryLoader::sync`
+  em `apps/gpui/model/src/controller/loaders.rs`; `pendingEntryPaths` com
+  `maxConcurrentEntryLoads` em `apps/player/Sources/HogPlayerKit/PlayerViewModel.swift`).
 - Depois de rolar a fila inteira (`input_probe scroll`, 400 passos de -5 linhas): protótipo 85 e
   82 MB; controle 89 e 93 MB.
 - Minimizado depois da rolagem: protótipo 81 e 82 MB; controle 87 e 97 MB.
 
 O protótipo começa mais alto com a fila (cerca de 40 MB a mais) e cai depois da rolagem; o
 controle sobe ao rolar. Depois de percorrer a fila os dois ficam na mesma faixa (80 a 97 MB).
-O tempo de "encher a fila" não se mediu como no plano: os dois apps leem só as linhas visíveis,
-e a CPU já estava abaixo de 2% no primeiro segundo.
+
+Causa provável dos 40 MB a mais, lida no código e não medida: cada linha do protótipo
+decodifica a capa embutida inteira (`image::load_from_memory` em
+`apps/gpui/model/src/media/artwork.rs`) e só depois a reduz a 96 px, com quatro linhas
+carregando ao mesmo tempo. O controle pede só a miniatura ao ImageIO
+(`CGImageSourceCreateThumbnailAtIndex` com `kCGImageSourceThumbnailMaxPixelSize` de 96, em
+`apps/player/Sources/HogPlayerKit/QueueEntry.swift`); o comentário de `makeThumbnail` diz que ela
+sai sem decodificar a imagem inteira. As miniaturas guardadas têm o mesmo lado máximo nos dois
+apps (96 px): a diferença estaria no pico da carga.
+
+O tempo de "encher a fila" não se mediu nesta rodada. O critério do plano é o tempo até a CPU
+ficar abaixo de 2% por 3 s, e ela já estava abaixo de 2% no primeiro segundo amostrado: não
+houve trecho para medir. Quatro cargas decodificando capas dificilmente caberiam em 2%. A
+explicação provável é que a carga das 221 linhas terminou antes da primeira amostra que conta
+(a 1ª do `top` é descartada). Não foi conferido.
 
 ## Medição 4: abertura
 

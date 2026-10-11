@@ -697,6 +697,28 @@ fn o_passo_do_volume_nao_passa_dos_limites(cx: &mut TestAppContext) {
     store.update(cx, |s, _| assert!(s.wait_idle(PRAZO)));
 }
 
+/// O `SetValue` da acessibilidade traz o número que o cliente mandou. Um NaN passa pelo `clamp`,
+/// e o core persiste o pedido e o reaplica em toda aquisição: cada play falharia.
+#[gpui::test]
+fn volume_nao_finito_nao_muda_o_modelo_nem_chega_ao_device(cx: &mut TestAppContext) {
+    let (fake, store) = assentada(cx, PlayerState::Playing);
+    let n = contar_sinais(cx, &store);
+
+    let mut vistos = Vec::new();
+    for valor in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        store.update(cx, |s, cx| s.apply_volume(valor, cx));
+        store.update(cx, |s, _| assert!(s.wait_idle(PRAZO)));
+        vistos.push(store.read_with(cx, |s, _| s.model().volume.value));
+    }
+
+    assert_eq!(vistos, vec![0.5; 3]);
+    assert_eq!(n.volume.get(), 0);
+    assert_eq!(
+        fake.with(|s| (s.escritas_de_volume, s.volume_aplicado)),
+        (0, None)
+    );
+}
+
 /// O texto da tela e o nó do slider usam o mesmo número: truncado, então 0,29 (que vira
 /// 28,999…) dá 28 nos dois.
 #[test]
@@ -961,6 +983,25 @@ fn a_mao_parada_no_arrasto_nao_publica_de_novo(cx: &mut TestAppContext) {
     assert_eq!((n.volume.get(), escritas), (1, 1));
 }
 
+/// Com o device recusando, o controlador põe no modelo o volume lido, e o ponto do mouse passa a
+/// valer outra coisa: o reenvio do macOS não pode virar uma escrita recusada por quadro.
+#[gpui::test]
+fn a_mao_parada_com_o_device_recusando_escreve_uma_vez_so(cx: &mut TestAppContext) {
+    let (fake, store, window, trilho) = volume_na_janela(cx);
+    fake.with(|s| s.falha_ao_aplicar_volume = Some("o device recusou".to_string()));
+    apertar(window, no_trilho(trilho, 0.3));
+    store.update(window, |s, _| assert!(s.wait_idle(PRAZO)));
+    let antes = fake.with(|s| s.escritas_de_volume);
+
+    for _ in 0..4 {
+        arrastar(window, no_trilho(trilho, 0.6));
+        store.update(window, |s, _| assert!(s.wait_idle(PRAZO)));
+    }
+
+    let escritas = fake.with(|s| s.escritas_de_volume) - antes;
+    assert_eq!((escritas, volume(window, &store)), (1, 0.5));
+}
+
 /// O movimento é ouvido na janela inteira: só o arrasto que começou no trilho mexe no volume.
 #[gpui::test]
 fn arrastar_comecando_fora_do_trilho_nao_mexe_no_volume(cx: &mut TestAppContext) {
@@ -1024,7 +1065,9 @@ fn arrastar_o_volume_nao_redesenha_a_view_irma_em_cache(cx: &mut TestAppContext)
     let trilho = trilho_util(window);
     apertar(window, no_trilho(trilho, 0.2));
     arrastar(window, no_trilho(trilho, 0.3));
-    // A troca de modalidade de entrada no primeiro evento do mouse redesenha tudo uma vez.
+    // O mouse-down no trilho, que tem id, liga o estado de clicado do GPUI, e ele chama
+    // `window.refresh()`: a janela inteira redesenha uma vez (`paint_mouse_listeners` em
+    // `div.rs`).
     renders.set(0);
 
     for fracao in [0.6, 0.8, 0.4] {

@@ -29,7 +29,7 @@ pub fn log_path() -> Option<PathBuf> {
 pub fn transition_log(path: Option<PathBuf>) -> LogSink {
     let file = path.and_then(open_log_file).map(Mutex::new);
     Arc::new(move |line: &str| {
-        eprintln!("{line}");
+        to_stderr(format_args!("{line}"));
         let Some(file) = &file else {
             return;
         };
@@ -51,14 +51,20 @@ pub fn transition_log(path: Option<PathBuf>) -> LogSink {
     })
 }
 
+/// O `eprintln!` entra em pânico quando a escrita falha (EPIPE ou EIO com o terminal fechado), e
+/// o log roda na main e no panic hook, onde um pânico vira abort.
+fn to_stderr(message: std::fmt::Arguments) {
+    let _ = writeln!(std::io::stderr(), "{message}");
+}
+
 fn open_log_file(path: PathBuf) -> Option<File> {
     match OpenOptions::new().create(true).append(true).open(&path) {
         Ok(file) => Some(file),
         Err(error) => {
-            eprintln!(
+            to_stderr(format_args!(
                 "o log de transições fica só no stderr: não abri {}: {error}",
                 path.display()
-            );
+            ));
             None
         }
     }
@@ -89,7 +95,9 @@ pub fn watch_signals(quit: Arc<AtomicBool>) -> std::io::Result<()> {
         Instant::now,
         |signal| {
             if let Err(error) = emulate_default_handler(signal) {
-                eprintln!("sinal {signal} repetido sem ação padrão ({error}): abortando");
+                to_stderr(format_args!(
+                    "sinal {signal} repetido sem ação padrão ({error}): abortando"
+                ));
                 std::process::abort();
             }
         },

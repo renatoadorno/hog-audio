@@ -32,6 +32,7 @@ pub struct VolumeView {
     store: Entity<Store>,
     track: Bounds<Pixels>,
     dragging: bool,
+    last_sent: Option<f64>,
     _volume: Subscription,
     _activation: Subscription,
 }
@@ -50,6 +51,7 @@ impl VolumeView {
             store,
             track: Bounds::default(),
             dragging: false,
+            last_sent: None,
             _volume,
             _activation,
         }
@@ -58,6 +60,7 @@ impl VolumeView {
     /// Com a mão no slider, o volume mudado por fora não o move (a regra do controlador).
     fn begin(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
         self.dragging = true;
+        self.last_sent = None;
         self.store.update(cx, |s, _| s.set_volume_editing(true));
         self.seek(position, cx);
     }
@@ -69,10 +72,13 @@ impl VolumeView {
             return;
         }
         let value = f64::from(((position.x - start) / span).clamp(0.0, 1.0));
-        // Com o botão apertado, o macOS reenvia o último movimento a cada 16 ms.
-        if value == self.store.read(cx).model().volume.value {
+        // Com o botão apertado, o macOS reenvia o último movimento a cada 16 ms. Comparar só com
+        // o modelo não basta: com a escrita recusada, ele volta ao volume do device, e o mesmo
+        // ponto seria pedido de novo a cada reenvio.
+        if self.last_sent == Some(value) || value == self.store.read(cx).model().volume.value {
             return;
         }
+        self.last_sent = Some(value);
         self.store.update(cx, |s, cx| s.apply_volume(value, cx));
     }
 
@@ -81,6 +87,7 @@ impl VolumeView {
             return;
         }
         self.dragging = false;
+        self.last_sent = None;
         self.store.update(cx, |s, _| s.set_volume_editing(false));
     }
 
