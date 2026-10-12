@@ -2136,12 +2136,7 @@ mod tests {
         assert_eq!(track.bit_depth, None);
         assert!(track.bitrate_kbps.is_some());
         let report = engine.device_report().expect("deveria ter negociado");
-        assert!(
-            report.negotiated.starts_with("44100 Hz"),
-            "{}",
-            report.negotiated
-        );
-        assert!(report.negotiated.contains("float"), "{}", report.negotiated);
+        assert_eq!(report.negotiated, "44100 Hz / 32 bits float");
     }
 
     #[test]

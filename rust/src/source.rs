@@ -52,15 +52,19 @@ fn four_cc(value: u32) -> String {
 /// A profundidade que o arquivo declara, ou 0 quando ele não tem uma. FLAC e ALAC deixam
 /// `mBitsPerChannel` zerado e a guardam nos format flags; noutros codecs os flags significam
 /// outra coisa (no AAC, o tipo de objeto MPEG-4) e não podem ser lidos assim.
-#[allow(non_upper_case_globals)]
 fn declared_bit_depth(format_id: u32, flags: u32, bits_per_channel: u32) -> u32 {
     if bits_per_channel != 0 {
         return bits_per_channel;
     }
-    match format_id {
-        kAudioFormatAppleLossless | kAudioFormatFLAC => bit_depth_from_source_flags(flags),
-        _ => 0,
+    if reads_depth_from_flags(format_id) {
+        bit_depth_from_source_flags(flags)
+    } else {
+        0
     }
+}
+
+fn reads_depth_from_flags(format_id: u32) -> bool {
+    format_id == kAudioFormatAppleLossless || format_id == kAudioFormatFLAC
 }
 
 /// Os codecs com perda que tocam com a saída do decodificador intacta (ADR 0002 do core). O
@@ -68,6 +72,37 @@ fn declared_bit_depth(format_id: u32, flags: u32, bits_per_channel: u32) -> u32 
 /// resamplearia em silêncio.
 fn is_supported_lossy(format_id: u32) -> bool {
     format_id == kAudioFormatMPEG4AAC || format_id == kAudioFormatMPEGLayer3
+}
+
+#[derive(Debug, PartialEq)]
+enum Kind {
+    Lossless(u32),
+    Lossy,
+}
+
+/// O que o arquivo é, só pelo que o formato declara. Pura, para cada ramo ter teste sem
+/// fixture; o bitrate fica de fora porque exige o arquivo aberto.
+fn classify(format_id: u32, flags: u32, bits_per_channel: u32) -> Result<Kind, String> {
+    let bits = declared_bit_depth(format_id, flags, bits_per_channel);
+    if bits != 0 {
+        return Ok(Kind::Lossless(bits));
+    }
+    if is_supported_lossy(format_id) {
+        return Ok(Kind::Lossy);
+    }
+    let codec_name = four_cc(format_id);
+    // FLAC ou ALAC sem profundidade reconhecida (um FLAC de 8 bits, por exemplo) é sem perda: a
+    // recusa é a de sempre, não a de codec com perda.
+    if reads_depth_from_flags(format_id) {
+        return Err(format!(
+            "não consegui determinar a profundidade de bits de {codec_name}; sem isso não dá \
+             para garantir reprodução sem perda"
+        ));
+    }
+    Err(format!(
+        "{codec_name}: sem profundidade de bits e fora dos codecs com perda suportados \
+         (AAC-LC e MP3)"
+    ))
 }
 
 /// Bit/s em kbps, arredondado. Zero vira `None`: a tela mostra só o codec, nunca "0 kbps".
@@ -155,19 +190,15 @@ impl AudioSource {
         }
 
         let codec_name = four_cc(asbd.mFormatID);
-        let bit_depth = declared_bit_depth(asbd.mFormatID, asbd.mFormatFlags, asbd.mBitsPerChannel);
-        let resolution = if bit_depth != 0 {
-            Resolution::Lossless { bits: bit_depth }
-        } else if is_supported_lossy(asbd.mFormatID) {
-            Resolution::Lossy {
+        let resolution = match classify(asbd.mFormatID, asbd.mFormatFlags, asbd.mBitsPerChannel) {
+            Ok(Kind::Lossless(bits)) => Resolution::Lossless { bits },
+            Ok(Kind::Lossy) => Resolution::Lossy {
                 bitrate_kbps: read_bitrate_kbps(file),
+            },
+            Err(message) => {
+                unsafe { ExtAudioFileDispose(file) };
+                return Err(message);
             }
-        } else {
-            unsafe { ExtAudioFileDispose(file) };
-            return Err(format!(
-                "{codec_name}: sem profundidade de bits e fora dos codecs com perda suportados \
-                 (AAC-LC e MP3)"
-            ));
         };
 
         let mut total_frames: i64 = 0;
@@ -381,8 +412,9 @@ mod tests {
         };
         // Faixa, e não valor exato: o AAC sai em VBR, e o bitrate depende do encoder da Apple.
         assert!(kbps > 0 && kbps <= 400, "{kbps}");
-        let seconds = source.total_frames() as f64 / f.sample_rate;
-        assert!((seconds - 6.0).abs() < 0.05, "{seconds}");
+        // 6 s exatos: o priming do encoder (2112 frames) não entra. Uma tolerância de 0,05 s o
+        // aceitaria, porque 2112 frames são 0,048 s.
+        assert_eq!(source.total_frames(), 264_600);
     }
 
     #[test]
@@ -422,6 +454,50 @@ mod tests {
         assert_eq!(
             source.format().resolution,
             Resolution::Lossless { bits: 16 }
+        );
+    }
+
+    // Um FLAC de 8 bits chega sem profundidade reconhecida ("from UNKNOWN source bit depth" no
+    // afinfo): continua recusado com a mensagem de sempre, sem ser tratado como codec com perda.
+    #[test]
+    fn flac_sem_profundidade_reconhecida_mantem_a_recusa_de_sempre() {
+        assert_eq!(
+            classify(kAudioFormatFLAC, 0, 0),
+            Err(
+                "não consegui determinar a profundidade de bits de flac; sem isso não dá para \
+                 garantir reprodução sem perda"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            classify(kAudioFormatAppleLossless, 0, 0),
+            Err(
+                "não consegui determinar a profundidade de bits de alac; sem isso não dá para \
+                 garantir reprodução sem perda"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn classificacao_separa_sem_perda_com_perda_e_recusa() {
+        assert_eq!(
+            classify(
+                kAudioFormatFLAC,
+                kAppleLosslessFormatFlag_24BitSourceData,
+                0
+            ),
+            Ok(Kind::Lossless(24))
+        );
+        assert_eq!(classify(kAudioFormatMPEG4AAC, 0, 0), Ok(Kind::Lossy));
+        assert_eq!(classify(kAudioFormatMPEGLayer3, 0, 0), Ok(Kind::Lossy));
+        assert_eq!(
+            classify(kAudioFormatMPEG4AAC_HE, 0, 0),
+            Err(
+                "aach: sem profundidade de bits e fora dos codecs com perda suportados \
+                 (AAC-LC e MP3)"
+                    .to_string()
+            )
         );
     }
 }

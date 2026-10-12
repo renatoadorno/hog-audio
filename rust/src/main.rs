@@ -80,18 +80,27 @@ fn describe_format(f: &AudioStreamBasicDescription) -> String {
 /// Sem esta linha não há como saber, olhando a saída, se o que tocou passou pelo filtro ou
 /// foi entregue byte a byte — e essa é a diferença que o projeto inteiro existe para tornar
 /// explícita.
-fn print_tuning_report(curve: Option<&Curve>) {
+fn print_tuning_report(curve: Option<&Curve>, lossy: bool) {
+    println!("{}", tuning_line(curve, lossy));
+}
+
+/// A faixa com perda nunca é chamada de bit-perfect, mesmo com o PCM do decodificador intacto
+/// (ADR 0002 do core).
+fn tuning_line(curve: Option<&Curve>, lossy: bool) -> String {
     match curve {
-        None => println!("afinação : desligada — saída bit-perfect"),
+        None if lossy => {
+            "afinação : desligada — saída idêntica ao decodificador (arquivo com perda)".to_string()
+        }
+        None => "afinação : desligada — saída bit-perfect".to_string(),
         Some(curve) => {
             let pontos = curve.points();
-            println!(
+            format!(
                 "afinação : {} pontos, {:.0}-{:.0} Hz, preamp {:.1} dB",
                 pontos.len(),
                 pontos[0].hz,
                 pontos[pontos.len() - 1].hz,
                 curve.preamp_db()
-            );
+            )
         }
     }
 }
@@ -326,7 +335,7 @@ fn run() -> i32 {
     if let Some(report) = engine.device_report() {
         print_device_report(&report);
     }
-    print_tuning_report(engine.tuning().as_ref());
+    print_tuning_report(engine.tuning().as_ref(), track.bit_depth.is_none());
     if options.info_only {
         return 0;
     }
@@ -464,4 +473,27 @@ fn run_dump(
         return 1;
     }
     0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sem_afinacao_o_arquivo_sem_perda_sai_bit_perfect() {
+        assert_eq!(
+            tuning_line(None, false),
+            "afinação : desligada — saída bit-perfect"
+        );
+    }
+
+    // ADR 0002 do core: a faixa com perda nunca é chamada de bit-perfect, mesmo com o PCM do
+    // decodificador intacto.
+    #[test]
+    fn sem_afinacao_a_faixa_com_perda_nao_se_diz_bit_perfect() {
+        assert_eq!(
+            tuning_line(None, true),
+            "afinação : desligada — saída idêntica ao decodificador (arquivo com perda)"
+        );
+    }
 }
