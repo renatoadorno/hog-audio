@@ -57,7 +57,7 @@ final class FakePlayer: HogPlayerProtocol, @unchecked Sendable {
     var portaoDoPlay: DispatchSemaphore?
 
     private func track() -> TrackFormat {
-        TrackFormat(sampleRate: 44100, bitDepth: 16, channels: 2,
+        TrackFormat(sampleRate: 44100, bitDepth: 16, bitrateKbps: nil, channels: 2,
                     codec: "flac", deviceName: "Fake", totalSeconds: 10)
     }
     /// Como no engine, cada entrada nova ganha um id acima de todos os que já existem.

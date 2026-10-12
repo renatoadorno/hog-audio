@@ -21,7 +21,7 @@ import HogAudioBindings
 }
 
 private let faixa = TrackFormat(
-    sampleRate: 96000, bitDepth: 24, channels: 2,
+    sampleRate: 96000, bitDepth: 24, bitrateKbps: nil, channels: 2,
     codec: "flac", deviceName: "Fones de Ouvido Externos", totalSeconds: 208.7
 )
 
@@ -100,7 +100,7 @@ private func snap(
     // 96000 (a fixture `faixa`) é múltiplo redondo de 1000 e mascara truncamento — por isso
     // este caso precisa de uma taxa própria.
     let cd = TrackFormat(
-        sampleRate: 44100, bitDepth: 16, channels: 2,
+        sampleRate: 44100, bitDepth: 16, bitrateKbps: nil, channels: 2,
         codec: "flac", deviceName: "Fones de Ouvido Externos", totalSeconds: 208.7
     )
     let d = displayState(snapshot: snap(.playing), metadata: tags, format: cd)
@@ -140,4 +140,13 @@ private func snap(
     )
     #expect(last.canGoPrevious)
     #expect(!last.canGoNext)
+}
+
+@Test func aLinhaTecnicaDaFaixaComPerdaMostraCodecEBitrate() {
+    let aac = TrackFormat(
+        sampleRate: 48000, bitDepth: nil, bitrateKbps: 339, channels: 2,
+        codec: "aac", deviceName: "Fones de Ouvido Externos", totalSeconds: 208.7
+    )
+    let d = displayState(snapshot: snap(.playing), metadata: tags, format: aac)
+    #expect(d.technicalLine == "48 kHz · AAC 339 kbps · hog ativo")
 }

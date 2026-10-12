@@ -39,6 +39,7 @@ public func displayState(
             qualityDetail(
                 sampleRate: format.sampleRate,
                 bitDepth: format.bitDepth,
+                bitrateKbps: format.bitrateKbps,
                 codec: format.codec
             ),
         ]

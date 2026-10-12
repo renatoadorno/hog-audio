@@ -42,10 +42,16 @@ public func queueEntryInfo(
             title: metadata.title,
             artist: metadata.artist,
             album: metadata.album,
-            quality: compactQuality(sampleRate: format.sampleRate, bitDepth: format.bitDepth),
+            quality: compactQuality(
+                sampleRate: format.sampleRate,
+                bitDepth: format.bitDepth,
+                bitrateKbps: format.bitrateKbps,
+                codec: format.codec
+            ),
             qualityDetail: qualityDetail(
                 sampleRate: format.sampleRate,
                 bitDepth: format.bitDepth,
+                bitrateKbps: format.bitrateKbps,
                 codec: format.codec
             ),
             duration: formatTime(format.totalSeconds),

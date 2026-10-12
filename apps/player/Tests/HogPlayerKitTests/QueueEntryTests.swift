@@ -10,14 +10,25 @@ private let tags = TrackMetadata(
 )
 
 private let sonda = TrackProbe(
-    sampleRate: 44100, bitDepth: 24, channels: 2, codec: "flac", totalSeconds: 149.6
+    sampleRate: 44100, bitDepth: 24, bitrateKbps: nil, channels: 2, codec: "flac",
+    totalSeconds: 149.6
 )
 
 @Test func seloCompactoUsaBitsBarraKilohertz() {
-    #expect(compactQuality(sampleRate: 44100, bitDepth: 24) == "24/44.1")
-    #expect(compactQuality(sampleRate: 96000, bitDepth: 24) == "24/96")
-    #expect(compactQuality(sampleRate: 192_000, bitDepth: 24) == "24/192")
-    #expect(compactQuality(sampleRate: 44100, bitDepth: 16) == "16/44.1")
+    #expect(compactQuality(sampleRate: 44100, bitDepth: 24, bitrateKbps: nil, codec: "flac") == "24/44.1")
+    #expect(compactQuality(sampleRate: 96000, bitDepth: 24, bitrateKbps: nil, codec: "flac") == "24/96")
+    #expect(compactQuality(sampleRate: 192_000, bitDepth: 24, bitrateKbps: nil, codec: "flac") == "24/192")
+    #expect(compactQuality(sampleRate: 44100, bitDepth: 16, bitrateKbps: nil, codec: "flac") == "16/44.1")
+}
+
+@Test func faixaComPerdaMostraCodecEBitrateNoLugarDosBits() {
+    #expect(compactQuality(sampleRate: 48000, bitDepth: nil, bitrateKbps: 339, codec: "aac") == "AAC 339")
+    #expect(qualityDetail(sampleRate: 48000, bitDepth: nil, bitrateKbps: 339, codec: "aac") == "48 kHz · AAC 339 kbps")
+}
+
+@Test func faixaComPerdaSemBitrateMostraSoOCodec() {
+    #expect(compactQuality(sampleRate: 44100, bitDepth: nil, bitrateKbps: nil, codec: "mp3") == "MP3")
+    #expect(qualityDetail(sampleRate: 44100, bitDepth: nil, bitrateKbps: nil, codec: "mp3") == "44.1 kHz · MP3")
 }
 
 @Test func subtituloJuntaArtistaEAlbumSoQuandoExistem() {
@@ -98,4 +109,24 @@ private let sonda = TrackProbe(
     // A mensagem do Rust, não a descrição do enum gerado pelo uniffi.
     #expect(!problem.hasPrefix("Load("))
     #expect(info.title == "hog-audio-nao-existe-fila")
+}
+
+@Test func cargaRealDeAacMostraCodecEBitrate() async throws {
+    let path = try fixture("t44_aac.m4a").path
+    // O bitrate do AAC é VBR e depende do encoder: o esperado vem da mesma sondagem do core.
+    let kbps = try #require(try probeTrack(path: path).bitrateKbps)
+    let info = await loadQueueEntry(path: path)
+    #expect(info.problem == nil)
+    #expect(info.quality == "AAC \(kbps)")
+    #expect(info.qualityDetail == "44.1 kHz · AAC \(kbps) kbps")
+    #expect(info.duration == "0:06")
+}
+
+@Test func heAacViraProblemaComONomeDoCodec() async throws {
+    let info = await loadQueueEntry(path: try fixture("t44_heaac.m4a").path)
+    #expect(
+        info.problem
+            == "aach: sem profundidade de bits e fora dos codecs com perda suportados (AAC-LC e MP3)"
+    )
+    #expect(info.quality == nil)
 }
