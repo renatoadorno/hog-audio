@@ -65,8 +65,8 @@ decodificador por outra ferramenta.
   rate → formato → volume ficam intactos, e as provas `make verify*` continuam valendo.
 - Entra uma prova nova, `make verify-lossy`, que compara o dump do player com o `afconvert` em
   float32.
-- A mensagem de recusa nomeia o codec ("aach", não "1633772320"): o `four_cc` corta o espaço
-  final e o ponto inicial.
+- O nome do codec sai limpo nas mensagens e na tela ("aac", não "1633772320"; "mp3", não
+  ".mp3"): o `four_cc` corta o espaço final e o ponto inicial.
 - Ficam de fora, registrados no `docs/ROADMAP.md`, Fase 0.1:
   - o resample;
   - o HE-AAC, o Opus e os outros codecs com perda;

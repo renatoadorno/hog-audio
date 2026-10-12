@@ -21,10 +21,10 @@ O que já existe:
   - o auto-avanço passa à faixa seguinte;
   - o device perdido é recuperado.
 
-O que o core recusa hoje, por decisão de 08/2026 (`rust/src/source.rs`, `rust/src/format.rs`):
-- **Formatos com perda** (AAC, MP3): o decodificador não informa a profundidade de bits, e o core
-  recusa com "não consegui determinar a profundidade de bits". O app aceita esses arquivos na
-  fila, e eles falham ao tocar.
+O que o core recusa hoje (`rust/src/source.rs`, `rust/src/format.rs`):
+- **Formatos com perda fora de AAC-LC e MP3** (HE-AAC, Opus e outros): recusados com o nome do
+  codec na mensagem. AAC-LC e MP3 tocam desde 11/10/2026 (Fase 0.1); até lá, todo formato com
+  perda era recusado, por decisão de 08/2026.
 - **Rate que o device não suporta:** a faixa é recusada, porque "Reproduzir exigiria resample".
 - **Arquivo acima de 24 bits** num device que só tem float32, e arquivo com mais canais do que o
   device.
