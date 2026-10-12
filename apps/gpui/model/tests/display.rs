@@ -9,7 +9,8 @@ use support::snapshot;
 fn faixa() -> Format {
     Format {
         sample_rate: 96_000.0,
-        bit_depth: 24,
+        bit_depth: Some(24),
+        bitrate_kbps: None,
         codec: "flac".to_string(),
     }
 }
@@ -105,7 +106,8 @@ fn underruns_aparecem_na_linha_tecnica() {
 fn taxa_derivada_de_cd_mostra_a_casa_decimal() {
     let cd = Format {
         sample_rate: 44_100.0,
-        bit_depth: 16,
+        bit_depth: Some(16),
+        bitrate_kbps: None,
         codec: "flac".to_string(),
     };
     let d = display_state(
@@ -152,4 +154,20 @@ fn navegacao_respeita_pontas_e_regra_dos_tres_segundos() {
     );
     assert!(last.can_go_previous);
     assert!(!last.can_go_next);
+}
+
+#[test]
+fn a_linha_tecnica_da_faixa_com_perda_mostra_codec_e_bitrate() {
+    let aac = Format {
+        sample_rate: 48_000.0,
+        bit_depth: None,
+        bitrate_kbps: Some(339),
+        codec: "aac".to_string(),
+    };
+    let d = display_state(
+        &snapshot(PlayerState::Playing, 0.0, 0, Some(0), 1),
+        Some(&tags()),
+        Some(&aac),
+    );
+    assert_eq!(d.technical_line, "48 kHz · AAC 339 kbps · hog ativo");
 }

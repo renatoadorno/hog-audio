@@ -99,7 +99,9 @@ impl From<QueueItem> for Track {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Format {
     pub sample_rate: f64,
-    pub bit_depth: u32,
+    /// `None` na faixa com perda.
+    pub bit_depth: Option<u32>,
+    pub bitrate_kbps: Option<u32>,
     pub codec: String,
 }
 
@@ -108,6 +110,7 @@ impl From<&TrackFormat> for Format {
         Self {
             sample_rate: format.sample_rate,
             bit_depth: format.bit_depth,
+            bitrate_kbps: format.bitrate_kbps,
             codec: format.codec.clone(),
         }
     }

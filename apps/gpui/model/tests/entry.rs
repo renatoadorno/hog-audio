@@ -17,7 +17,8 @@ fn tags(artist: Option<&str>, album: Option<&str>) -> Tags {
 fn sonda() -> ProbeOutcome {
     ProbeOutcome::Probed {
         sample_rate: 44_100.0,
-        bit_depth: 24,
+        bit_depth: Some(24),
+        bitrate_kbps: None,
         codec: "flac".to_string(),
         total_seconds: 149.6,
     }
@@ -81,6 +82,23 @@ fn carga_real_usa_a_mesma_sondagem_do_engine() {
     );
     assert_eq!(info.duration.as_deref(), Some("0:06"));
     assert!(info.problem.is_none());
+}
+
+#[test]
+fn carga_real_de_aac_mostra_codec_e_bitrate() {
+    let path = fixture("t44_aac.m4a");
+    // O bitrate do AAC é VBR e depende do encoder: o esperado vem da mesma sondagem do core.
+    let kbps = hog_audio::api::probe_track(path.clone())
+        .expect("deveria sondar o AAC")
+        .bitrate_kbps
+        .expect("o AAC deveria ter bitrate");
+    let info = load_queue_entry(&path);
+    assert_eq!(info.problem, None);
+    assert_eq!(info.quality, Some(format!("AAC {kbps}")));
+    assert_eq!(
+        info.quality_detail,
+        Some(format!("44.1 kHz · AAC {kbps} kbps"))
+    );
 }
 
 #[test]

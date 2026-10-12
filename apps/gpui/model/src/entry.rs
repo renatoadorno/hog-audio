@@ -34,7 +34,8 @@ impl QueueEntryInfo {
 pub enum ProbeOutcome {
     Probed {
         sample_rate: f64,
-        bit_depth: u32,
+        bit_depth: Option<u32>,
+        bitrate_kbps: Option<u32>,
         codec: String,
         total_seconds: f64,
     },
@@ -50,11 +51,17 @@ pub fn queue_entry_info(
         ProbeOutcome::Probed {
             sample_rate,
             bit_depth,
+            bitrate_kbps,
             codec,
             total_seconds,
         } => (
-            Some(compact_quality(sample_rate, bit_depth)),
-            Some(quality_detail(sample_rate, bit_depth, &codec)),
+            Some(compact_quality(
+                sample_rate,
+                bit_depth,
+                bitrate_kbps,
+                &codec,
+            )),
+            Some(quality_detail(sample_rate, bit_depth, bitrate_kbps, &codec)),
             Some(format_time(total_seconds)),
             None,
         ),
@@ -80,6 +87,7 @@ pub fn load_queue_entry(path: &str) -> QueueEntryInfo {
         Ok(probe) => ProbeOutcome::Probed {
             sample_rate: probe.sample_rate,
             bit_depth: probe.bit_depth,
+            bitrate_kbps: probe.bitrate_kbps,
             codec: probe.codec,
             total_seconds: probe.total_seconds,
         },

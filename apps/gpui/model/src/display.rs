@@ -43,6 +43,7 @@ pub fn display_state(
             let mut parts = vec![quality_detail(
                 format.sample_rate,
                 format.bit_depth,
+                format.bitrate_kbps,
                 &format.codec,
             )];
             if holds_device {

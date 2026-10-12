@@ -206,7 +206,8 @@ fn novo_item(itens: &[Item], path: &str) -> Item {
 fn track() -> TrackFormat {
     TrackFormat {
         sample_rate: 44_100.0,
-        bit_depth: 16,
+        bit_depth: Some(16),
+        bitrate_kbps: None,
         channels: 2,
         codec: "flac".to_string(),
         device_name: "Fake".to_string(),

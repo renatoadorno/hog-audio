@@ -27,13 +27,31 @@ fn format_kilohertz(hz: f64) -> String {
     }
 }
 
-pub fn quality_detail(sample_rate: f64, bit_depth: u32, codec: &str) -> String {
-    format!(
-        "{} kHz · {bit_depth} bit · {codec}",
-        format_kilohertz(sample_rate)
-    )
+/// "44.1 kHz · 24 bit · flac" ou, na faixa com perda, "48 kHz · AAC 339 kbps".
+pub fn quality_detail(
+    sample_rate: f64,
+    bit_depth: Option<u32>,
+    bitrate_kbps: Option<u32>,
+    codec: &str,
+) -> String {
+    let rate = format!("{} kHz", format_kilohertz(sample_rate));
+    match (bit_depth, bitrate_kbps) {
+        (Some(bits), _) => format!("{rate} · {bits} bit · {codec}"),
+        (None, Some(kbps)) => format!("{rate} · {} {kbps} kbps", codec.to_uppercase()),
+        (None, None) => format!("{rate} · {}", codec.to_uppercase()),
+    }
 }
 
-pub fn compact_quality(sample_rate: f64, bit_depth: u32) -> String {
-    format!("{bit_depth}/{}", format_kilohertz(sample_rate))
+/// "24/44.1" ou, na faixa com perda, que não tem bits a mostrar, "AAC 339".
+pub fn compact_quality(
+    sample_rate: f64,
+    bit_depth: Option<u32>,
+    bitrate_kbps: Option<u32>,
+    codec: &str,
+) -> String {
+    match (bit_depth, bitrate_kbps) {
+        (Some(bits), _) => format!("{bits}/{}", format_kilohertz(sample_rate)),
+        (None, Some(kbps)) => format!("{} {kbps}", codec.to_uppercase()),
+        (None, None) => codec.to_uppercase(),
+    }
 }
