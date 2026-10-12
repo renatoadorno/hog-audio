@@ -23,6 +23,15 @@
        alt="A janela do hog-audio com o álbum Sugar, de Robin Schulz, em FLAC 24 bits / 96 kHz: a capa e o transporte à esquerda, a fila de 15 faixas à direita">
 </p>
 
+## Por que o hog-audio
+
+- **Gratuito e de código aberto.** Licença MIT, sem conta, sem assinatura e sem telemetria.
+- **Bit-perfect verificável, não só prometido.** As provas deste repositório comparam a saída do
+  player com a do ffmpeg, amostra por amostra, e toda mudança no caminho do áudio precisa passar
+  nelas ([Como o bit-perfect é provado](#como-o-bit-perfect-é-provado)).
+- **Nativo e leve.** Núcleo em Rust e interface em SwiftUI, usando só o Core Audio do próprio
+  macOS: sem tecnologia web, sem driver e sem extensão de kernel.
+
 ## O que ele faz
 
 - **Toca em modo exclusivo.** Assume o dispositivo de saída em hog mode
@@ -137,7 +146,7 @@ Outras opções:
 - `--volume 35` ou `--volume -18dB`: o volume da reprodução, em porcentagem ou como atenuação
   exata;
 - `--max-volume 60`: muda o teto de segurança, que por padrão é de 50%;
-- `--tuning curva.txt`: liga a afinação (veja abaixo);
+- `--tuning curva.txt`: liga a afinação, ainda em desenvolvimento (veja abaixo);
 - `--dump arquivo.raw`: grava num arquivo os bytes que iriam ao DAC, sem reproduzir.
 
 ## Volume e segurança
@@ -161,7 +170,10 @@ O código contorna duas armadilhas do Core Audio:
   consulta a saída padrão durante a reprodução, inclusive o `system_profiler`, vê o volume do
   dispositivo errado. Por isso o player nunca usa a saída padrão enquanto ocupa um dispositivo.
 
-## Afinação (`--tuning`)
+## Afinação (`--tuning`), em desenvolvimento
+
+> Experimental: por enquanto só na linha de comando, ainda não no app. O que falta está na
+> [issue #3](https://github.com/renatoadorno/hog-audio/issues/3).
 
 É um segundo modo de reprodução, que aplica uma curva de resposta em frequência escolhida por
 você. **Com a afinação ligada, a saída deixa de ser bit-perfect**, porque aplicar um filtro é

@@ -25,6 +25,15 @@
 
 > The app's interface and the command-line output are in Brazilian Portuguese.
 
+## Why hog-audio
+
+- **Free and open source.** MIT-licensed, with no account, no subscription and no telemetry.
+- **Bit-perfect you can verify, not just a promise.** The proofs in this repository compare the
+  player's output with ffmpeg's, sample by sample, and every change to the audio path has to pass
+  them ([How bit-perfect is proven](#how-bit-perfect-is-proven)).
+- **Native and lightweight.** A Rust core and a SwiftUI interface, using only macOS's own Core
+  Audio: no web technology, no drivers and no kernel extensions.
+
 ## What it does
 
 - **Plays in exclusive mode.** Takes over the output device in hog mode
@@ -141,7 +150,7 @@ Other options:
 - `--volume 35` or `--volume -18dB`: the playback volume, as a percentage or as an exact
   attenuation;
 - `--max-volume 60`: changes the safety ceiling, which defaults to 50%;
-- `--tuning curve.txt`: turns on tuning (see below);
+- `--tuning curve.txt`: turns on tuning, still in development (see below);
 - `--dump file.raw`: writes the bytes that would go to the DAC to a file, without playing.
 
 ## Volume and safety
@@ -166,7 +175,10 @@ The code works around two Core Audio pitfalls:
   the wrong device. That is why the player never relies on the default output while it holds a
   device.
 
-## Tuning (`--tuning`)
+## Tuning (`--tuning`), in development
+
+> Experimental: available only from the command line, not in the app yet. The remaining work is
+> tracked in [#3](https://github.com/renatoadorno/hog-audio/issues/3).
 
 A second playback mode that applies a frequency-response curve of your choice. **With tuning on,
 the output is no longer bit-perfect**, because applying a filter means changing every sample. Hog
