@@ -7,7 +7,8 @@ INSTALL_DIR ?= /Applications
 OPEN_APP   ?= 1
 
 .PHONY: all rust fmt fmt-check lint rust-test hw-test bindings swift-test test fixtures \
-        icon verify verify-pause verify-volume info play app install-app update-app run-app clean
+        icon verify verify-pause verify-volume verify-lossy info play app install-app \
+        update-app run-app clean
 
 all: rust
 
@@ -90,6 +91,20 @@ verify-volume: rust
 	@test -s /tmp/hog_vol90.raw || { echo "FALHOU: dump vazio"; exit 1; }
 	@cmp /tmp/hog_vol20.raw /tmp/hog_vol90.raw \
 	  && echo "volume: amostras idênticas a 20% e 90%"
+
+# make verify-lossy FILE=testdata/t44_aac.m4a
+# Na faixa com perda o ffmpeg não serve de oráculo: o decodificador de AAC e MP3 dele difere do
+# da Apple nos últimos bits. O afconvert usa o mesmo decodificador da Apple por outra ferramenta,
+# então bater byte a byte prova que o app não acrescentou nada depois do decodificador. O ffmpeg
+# só tira o cabeçalho do WAV, sem converter (pcm_f32le para f32le).
+verify-lossy: rust
+	@test -n "$(FILE)" || { echo "uso: make verify-lossy FILE=arquivo.m4a"; exit 2; }
+	@afconvert -f WAVE -d LEF32 "$(FILE)" /tmp/hog_lossy_ref.wav
+	@ffmpeg -v error -y -i /tmp/hog_lossy_ref.wav -c:a copy -f f32le /tmp/hog_lossy_ref.raw
+	@./$(RUST_BIN) --dump /tmp/hog_lossy.raw "$(FILE)" >/dev/null
+	@test -s /tmp/hog_lossy.raw || { echo "FALHOU: dump vazio"; exit 1; }
+	@cmp /tmp/hog_lossy_ref.raw /tmp/hog_lossy.raw \
+	  && echo "com perda: o dump é idêntico ao que o decodificador da Apple entrega"
 
 # make info FILE=musicas/faixa.flac — mostra o que seria negociado, sem tocar no device.
 info: rust
