@@ -5,8 +5,9 @@
 <h1 align="center">hog-audio</h1>
 
 <p align="center">
-  Player de música para macOS que entrega o arquivo ao DAC pelo caminho digital mais curto que
-  o sistema permite: sem resample, sem mixer e sem nenhum outro app dividindo o conversor.
+  Player de música hi-res, exclusivo para macOS.<br>
+  Bit-perfect: seus FLAC e ALAC tocam exatamente como estão no arquivo, na resolução original,
+  com o DAC dedicado só à sua música.
 </p>
 
 <p align="center">
@@ -28,18 +29,29 @@
 - **Não passa pelo mixer.** Alimenta um `AudioDeviceIOProc` direto, com os bytes que o
   decodificador entregou.
 - **Ajusta o volume no hardware.** O controle é o do amplificador, o mesmo do slider do sistema,
-  e nenhuma amostra é alterada. Um teto de segurança protege o fone.
+  e nenhuma amostra é alterada. Um teto de segurança protege o ouvido e o equipamento ligado à
+  saída, seja fone, caixa ou DAC externo.
 - **Toca AAC e MP3 sem acrescentar perda.** O float32 que o decodificador da Apple entrega vai
   intacto ao device; a única perda é a da compressão
   ([ADR 0002 do core](rust/docs/adr/0002-arquivo-com-perda-sem-perda-do-app.md)).
 - **Mantém uma fila.** Cada faixa mostra capa, título, artista, álbum, duração e um selo de
   qualidade ("24/96", "16/44.1", "AAC 256"). Ao fim de uma, passa para a seguinte.
-- **Abre pelo Finder.** "Abrir com", duplo clique ou arrastar para a janela.
 - **Devolve o device como estava.** Ao terminar, restaura o rate, o formato, o volume e solta o
   modo exclusivo, inclusive com Ctrl+C.
 
 A tela mostra sempre o que chega ao DAC: na linha técnica, "96 kHz · 24 bit · flac · hog ativo"
 num FLAC, ou "48 kHz · AAC 339 kbps · hog ativo" numa faixa com perda.
+
+## Por que "hog"
+
+O hog-audio toca pelo próprio sistema de áudio do macOS, o Core Audio, sem driver nem biblioteca
+de terceiros. O som sai pelo conversor do Mac, que alimenta a saída de fone e as caixas, ou por um
+DAC externo que o macOS reconheça. Os testes até aqui foram feitos na saída interna de um MacBook
+Air M1.
+
+E ele toca sozinho. O nome vem do *hog mode* (`kAudioDevicePropertyHogMode`), o modo exclusivo do
+Core Audio: em inglês, *to hog* é tomar algo só para si. É o que o player faz com o DAC enquanto
+toca, para que nenhum outro app mexa no som que chega a ele.
 
 ## Formatos
 
@@ -123,9 +135,10 @@ Outras opções:
 
 ## Volume e segurança
 
-A saída de fone do Mac entrega tensão suficiente para machucar o ouvido e o fone quando fica no
-máximo. Por isso o volume é ajustado **depois de tomar o device e antes de qualquer som sair**,
-e devolvido ao valor anterior no fim. Sem `--volume`, ele só é mexido se estiver acima do teto.
+Volume no máximo pode machucar o ouvido e danificar o equipamento ligado à saída, seja fone,
+caixa ou amplificador; a saída de fone do Mac, por exemplo, entrega tensão suficiente para isso.
+Por isso o volume é ajustado **depois de tomar o device e antes de qualquer som sair**, e
+devolvido ao valor anterior no fim. Sem `--volume`, ele só é mexido se estiver acima do teto.
 
 Os decibéis vêm do amplificador, não de uma fórmula: pedir `-30dB` dá exatamente −30,0 dB no
 device. O número exibido é sempre lido do hardware, porque a conversão que o HAL publica não
