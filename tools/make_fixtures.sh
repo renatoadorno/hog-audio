@@ -20,6 +20,7 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
 command -v ffmpeg >/dev/null || { echo "falta ffmpeg (brew install ffmpeg)"; exit 1; }
+command -v afconvert >/dev/null || { echo "falta afconvert (vem com o macOS)"; exit 1; }
 mkdir -p "$DEST"
 
 # $1 = arquivo, $2 = sample rate, $3 = bits, $4 = canais, $5 = duração em segundos
@@ -102,6 +103,45 @@ com_tags() {
   echo "  + $nome (tags$([ "$capa" = 1 ] && echo " + capa"))"
 }
 
+# A fonte comum das fixtures com perda: o mesmo estéreo 440/660 Hz das fixtures de formato.
+fonte_estereo() {
+  local destino=$1
+  ffmpeg -v error -y \
+    -f lavfi -i "sine=frequency=440:duration=6:sample_rate=44100" \
+    -f lavfi -i "sine=frequency=660:duration=6:sample_rate=44100" \
+    -filter_complex "[0:a][1:a]amerge=inputs=2[a]" -map "[a]" -c:a pcm_s16le "$destino"
+}
+
+# $1 = arquivo, $2 = codec do afconvert (aac | aach | alac), $3 = bitrate em bit/s (0 = padrão)
+# O AAC sai do afconvert, o codificador da própria Apple: o ffmpeg não escreve HE-AAC sem a
+# libfdk, e o AAC da biblioteca real é o da Apple.
+pela_apple() {
+  local nome=$1 codec=$2 bitrate=$3 destino="$DEST/$1"
+  if [ -f "$destino" ] && [ "$FORCE" != "1" ]; then
+    echo "  = $nome (já existe)"
+    return
+  fi
+  local fonte="$TMP/fonte_$nome.wav"
+  fonte_estereo "$fonte"
+  local taxa=()
+  [ "$bitrate" != "0" ] && taxa=(-b "$bitrate")
+  afconvert -f m4af -d "$codec" ${taxa[@]+"${taxa[@]}"} "$fonte" "$destino"
+  echo "  + $nome ($codec)"
+}
+
+# $1 = arquivo; MP3 CBR de 192 kbps, para o bitrate lido ser previsível.
+mp3_cbr() {
+  local nome=$1 destino="$DEST/$1"
+  if [ -f "$destino" ] && [ "$FORCE" != "1" ]; then
+    echo "  = $nome (já existe)"
+    return
+  fi
+  local fonte="$TMP/fonte_$nome.wav"
+  fonte_estereo "$fonte"
+  ffmpeg -v error -y -i "$fonte" -c:a libmp3lame -b:a 192k "$destino"
+  echo "  + $nome (mp3 192 kbps)"
+}
+
 echo "fixtures de formato (negociação, ring buffer, bit-perfect):"
 tom t44_16.flac       44100  16 2  6
 tom t44_longo.flac    44100  16 2 25
@@ -109,6 +149,12 @@ tom t48_16_mono.flac  48000  16 1  6
 tom t96_24.flac       96000  24 2  6
 tom t96_longo.flac    96000  24 2 20
 tom t192_24.flac     192000  24 2  6
+
+echo "fixtures com perda (AAC-LC e MP3 tocam; HE-AAC é recusado) e ALAC em .m4a:"
+pela_apple t44_aac.m4a   aac  256000
+pela_apple t44_heaac.m4a aach 64000
+pela_apple t44_alac.m4a  alac 0
+mp3_cbr    t44_mp3.mp3
 
 echo "fixtures de metadados (leitura de tags e capa pelo AVFoundation):"
 com_tags meta_fixture.flac          flac       1
