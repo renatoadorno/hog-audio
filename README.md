@@ -5,104 +5,114 @@
 <h1 align="center">hog-audio</h1>
 
 <p align="center">
-  Player de música hi-res, exclusivo para macOS.<br>
-  Bit-perfect: seus FLAC e ALAC tocam exatamente como estão no arquivo, na resolução original,
-  com o DAC dedicado só à sua música.
+  A hi-res music player, exclusively for macOS.<br>
+  Bit-perfect: your FLAC and ALAC files play exactly as they are stored, at their original
+  resolution, with the DAC dedicated to your music alone.
 </p>
 
 <p align="center">
-  <strong>v0.1.0</strong> · macOS 14 ou mais novo · Apple Silicon · licença MIT
+  <strong>v0.1.0</strong> · macOS 14 or later · Apple Silicon · MIT license
+</p>
+
+<p align="center">
+  <strong>English</strong> · <a href="README.pt-BR.md">Português</a>
 </p>
 
 <p align="center">
   <img src="docs/images/player.png" width="860"
-       alt="A janela do hog-audio com o álbum Sugar, de Robin Schulz, em FLAC 24 bits / 96 kHz: a capa e o transporte à esquerda, a fila de 15 faixas à direita">
+       alt="The hog-audio window with the album Sugar, by Robin Schulz, in 24-bit / 96 kHz FLAC: the cover and transport controls on the left, the 15-track queue on the right">
 </p>
 
-## O que ele faz
+> The app's interface and the command-line output are in Brazilian Portuguese.
 
-- **Toca em modo exclusivo.** Toma o device de saída em hog mode
-  (`kAudioDevicePropertyHogMode`): enquanto toca, nenhum outro app consegue usar o conversor.
-- **Trava o DAC no rate do arquivo.** O conversor muda fisicamente de frequência para a da
-  faixa. Se o device não aceita esse rate, o player recusa tocar em vez de resamplear em
-  silêncio.
-- **Não passa pelo mixer.** Alimenta um `AudioDeviceIOProc` direto, com os bytes que o
-  decodificador entregou.
-- **Ajusta o volume no hardware.** O controle é o do amplificador, o mesmo do slider do sistema,
-  e nenhuma amostra é alterada. Um teto de segurança protege o ouvido e o equipamento ligado à
-  saída, seja fone, caixa ou DAC externo.
-- **Toca AAC e MP3 sem acrescentar perda.** O float32 que o decodificador da Apple entrega vai
-  intacto ao device; a única perda é a da compressão
-  ([ADR 0002 do core](rust/docs/adr/0002-arquivo-com-perda-sem-perda-do-app.md)).
-- **Mantém uma fila.** Cada faixa mostra capa, título, artista, álbum, duração e um selo de
-  qualidade ("24/96", "16/44.1", "AAC 256"). Ao fim de uma, passa para a seguinte.
-- **Devolve o device como estava.** Ao terminar, restaura o rate, o formato, o volume e solta o
-  modo exclusivo, inclusive com Ctrl+C.
+## What it does
 
-A tela mostra sempre o que chega ao DAC: na linha técnica, "96 kHz · 24 bit · flac · hog ativo"
-num FLAC, ou "48 kHz · AAC 339 kbps · hog ativo" numa faixa com perda.
+- **Plays in exclusive mode.** Takes over the output device in hog mode
+  (`kAudioDevicePropertyHogMode`): while it plays, no other app can use the converter.
+- **Locks the DAC to the file's sample rate.** The converter physically switches to the track's
+  frequency. If the device does not support that rate, the player refuses to play instead of
+  silently resampling.
+- **Bypasses the system mixer.** It feeds an `AudioDeviceIOProc` directly with the bytes the
+  decoder produced.
+- **Sets the volume in hardware.** It uses the amplifier's own control, the same one as the system
+  volume, and never changes a sample. A safety ceiling protects your ears and whatever is
+  connected to the output, be it headphones, speakers or an external DAC.
+- **Plays AAC and MP3 without adding loss.** The audio Apple's decoder delivers, as float32,
+  reaches the device untouched; the only loss is the one from compression
+  ([core ADR 0002](rust/docs/adr/0002-arquivo-com-perda-sem-perda-do-app.md), in Portuguese).
+- **Keeps a queue.** Each track shows its cover, title, artist, album, duration and a quality
+  badge ("24/96", "16/44.1", "AAC 256"). When a track ends, the next one starts.
+- **Gives the device back as it found it.** When it finishes, it restores the sample rate, format
+  and volume and releases exclusive mode, even when interrupted with Ctrl+C.
 
-## Por que "hog"
+The screen always shows what reaches the DAC. The technical line reads "96 kHz · 24 bit · flac ·
+hog ativo" (hog active) for a FLAC and "48 kHz · AAC 339 kbps · hog ativo" for a lossy track.
 
-O hog-audio toca pelo próprio sistema de áudio do macOS, o Core Audio, sem driver nem biblioteca
-de terceiros. O som sai pelo conversor do Mac, que alimenta a saída de fone e as caixas, ou por um
-DAC externo que o macOS reconheça. Os testes até aqui foram feitos na saída interna de um MacBook
-Air M1.
+## Why "hog"
 
-E ele toca sozinho. O nome vem do *hog mode* (`kAudioDevicePropertyHogMode`), o modo exclusivo do
-Core Audio: em inglês, *to hog* é tomar algo só para si. É o que o player faz com o DAC enquanto
-toca, para que nenhum outro app mexa no som que chega a ele.
+hog-audio plays through macOS's own audio system, Core Audio, with no third-party driver or
+library. Sound goes out through the Mac's converter, which drives the headphone jack and the
+speakers, or through any external DAC that macOS recognizes. So far it has been tested on the
+built-in output of a MacBook Air M1.
 
-## Formatos
+And it plays exclusively. The name comes from *hog mode* (`kAudioDevicePropertyHogMode`), Core
+Audio's exclusive mode: to hog something is to keep it all to yourself. That is what the player
+does with the DAC while it plays, so no other app can interfere with the sound that reaches it.
 
-- **Bit-perfect:** FLAC, ALAC, WAV, AIFF e CAF de até 24 bits, em qualquer rate que o device
-  aceite.
-- **Com perda só do arquivo:** AAC-LC e MP3, quando o device tem um formato float32 no rate do
-  arquivo. As saídas internas do Mac têm.
-- **Recusados, com o motivo na tela:**
-  - rate que o device não suporta, como FLAC de 192 kHz ou MP3 de 22,05 kHz no fone do Mac;
-  - HE-AAC, Opus e os outros codecs com perda;
-  - inteiro de 32 bits ou float de 64 bits num device float32, que não os comporta sem perda;
-  - arquivo com mais canais do que o device.
+## Formats
 
-## Instalar
+- **Bit-perfect:** FLAC, ALAC, WAV, AIFF and CAF up to 24 bits, at any sample rate the device
+  accepts.
+- **Lossy, with only the compression loss:** AAC-LC and MP3, when the device accepts float32 at
+  the file's sample rate, as the Mac's built-in outputs do.
+- **Refused, with the reason shown on screen:**
+  - a sample rate the device does not support, such as a 192 kHz FLAC or a 22.05 kHz MP3 on the
+    Mac's headphone output;
+  - HE-AAC, Opus and other lossy codecs;
+  - 32-bit integer or 64-bit float files on a float32 device, which cannot play them without
+    loss;
+  - files with more channels than the device.
 
-Ainda não há binário pronto: o app é montado a partir do código.
+## Install
 
-Requisitos:
-- macOS 14 ou mais novo, testado num MacBook Air M1;
-- Rust 1.88 ou mais novo, testado no 1.98;
-- toolchain do Swift 6 (Xcode ou Command Line Tools);
-- ffmpeg, só para os testes e as provas (`brew install ffmpeg`).
+There is no prebuilt download yet: the app is built from source.
+
+Requirements:
+- macOS 14 or later, tested on a MacBook Air M1;
+- Rust 1.88 or later, tested with 1.98;
+- the Swift 6 toolchain (Xcode or the Command Line Tools);
+- ffmpeg, only for the tests and the proofs (`brew install ffmpeg`).
 
 ```
 make install-app
 ```
 
-Monta o app, instala em `/Applications` (fechando com segurança uma versão aberta) e o abre.
-`make install-app INSTALL_DIR="$HOME/Applications"` instala só para o usuário atual, e
-`OPEN_APP=0` não abre no fim.
+This builds the app, installs it in `/Applications` (closing a running copy first) and opens it.
+`make install-app INSTALL_DIR="$HOME/Applications"` installs it for the current user only, and
+`OPEN_APP=0` skips opening it at the end.
 
-O app não tem sandbox de propósito, porque o hog mode não sobrevive a ela. Isso fecha a porta
-da App Store, que não é objetivo deste projeto.
+The app is not sandboxed, on purpose: hog mode does not work inside the sandbox. That rules out
+the App Store, which is not a goal of this project.
 
-## Usar
+## Usage
 
-- **Abrir músicas:** ⌘O (arquivos ou pastas, que entram recursivamente), arrastar do Finder para
-  a janela, ou "Abrir com → HogAudio" no Finder.
-- **Abrir com duplo clique:** no Finder, "Obter Informações" num arquivo → "Abrir com" →
-  HogAudio → "Alterar Tudo…", uma vez por tipo de arquivo.
-- **A fila:** o que entra vai para o fim; com a fila vazia, a primeira faixa fica carregada,
-  pronta para o Play. Delete remove a faixa selecionada, e "Limpar" esvazia a fila.
+- **Adding music:** ⌘O (files or folders, including subfolders), dragging from the Finder onto the
+  window, or "Open With → HogAudio" in the Finder.
+- **Opening with a double click:** in the Finder, use "Get Info" on a file → "Open with" →
+  HogAudio → "Change All…", once for each file type.
+- **Queue:** music is added to the end of the queue. If the queue was empty, the first track is
+  loaded and ready to play. Delete removes the selected track, and "Limpar" (Clear) empties the
+  queue.
 
-Enquanto o player segura o device, **os outros apps ficam sem som nele**, inclusive com a
-música pausada. Se houver outra saída, o macOS manda o som deles para ela; num MacBook com fone,
-saem pelas caixas. A pausa mantém o device para retomar na hora, sem risco de outro app
-tomá-lo. Fechar o app devolve tudo.
+While the player holds the device, **other apps cannot play through it**, even when the music is
+paused. If there is another output, macOS sends their sound there: on a MacBook with headphones
+plugged in, for example, other apps play through the speakers. Pausing keeps the device reserved,
+so playback resumes instantly without another app taking it. Quitting the app puts everything
+back.
 
-## Linha de comando
+## Command line
 
-O mesmo core funciona sem janela:
+The same core also runs in the terminal, without a window:
 
 ```
 make
@@ -110,7 +120,7 @@ make
 ./rust/target/release/hog-audio --info musicas/faixa.flac
 ```
 
-O `--info` mostra o que seria negociado, sem tocar no device:
+`--info` shows what would be negotiated, without taking the device:
 
 ```
 $ ./rust/target/release/hog-audio --info "02. Sugar (feat. Francesco Yates).flac"
@@ -127,61 +137,64 @@ negociado: 96000 Hz / 32 bits float
 afinação : desligada — saída bit-perfect
 ```
 
-Outras opções:
-- `--volume 35` ou `--volume -18dB`: o volume da reprodução, em porcentagem ou em atenuação exata;
-- `--max-volume 60`: muda o teto de segurança (padrão de 50%);
-- `--tuning curva.txt`: liga a afinação (ver abaixo);
-- `--dump arquivo.raw`: grava os bytes que iriam ao DAC, sem tocar.
+Other options:
+- `--volume 35` or `--volume -18dB`: the playback volume, as a percentage or as an exact
+  attenuation;
+- `--max-volume 60`: changes the safety ceiling, which defaults to 50%;
+- `--tuning curve.txt`: turns on tuning (see below);
+- `--dump file.raw`: writes the bytes that would go to the DAC to a file, without playing.
 
-## Volume e segurança
+## Volume and safety
 
-Volume no máximo pode machucar o ouvido e danificar o equipamento ligado à saída, seja fone,
-caixa ou amplificador; a saída de fone do Mac, por exemplo, entrega tensão suficiente para isso.
-Por isso o volume é ajustado **depois de tomar o device e antes de qualquer som sair**, e
-devolvido ao valor anterior no fim. Sem `--volume`, ele só é mexido se estiver acima do teto.
+Full volume can hurt your ears and damage whatever is connected to the output, be it headphones,
+speakers or an amplifier; the Mac's headphone output, for example, delivers enough voltage to do
+so. That is why the volume is set **after the player takes the device and before any sound comes
+out**, and restored to its previous value at the end. Without `--volume`, it is only changed when
+it is above the ceiling.
 
-Os decibéis vêm do amplificador, não de uma fórmula: pedir `-30dB` dá exatamente −30,0 dB no
-device. O número exibido é sempre lido do hardware, porque a conversão que o HAL publica não
-bate com a curva que ele aplica.
+The decibels come from the amplifier itself, not from a formula: asking for `-30dB` gives exactly
+−30.0 dB on the device. The value shown is always read back from the hardware, because the
+conversion the HAL reports does not match the curve it actually applies.
 
-Duas armadilhas do Core Audio que o código contorna:
-- **A primeira escrita de volume depois de reconfigurar o formato é descartada em silêncio.** O
-  HAL devolve `noErr`, e a leitura seguinte devolve o valor pedido, vindo de cache. O player
-  confere com uma releitura atrasada; um pedido explícito que não se confirma aborta a
-  reprodução, em vez de tocar no volume errado.
-- **Com o device tomado, o macOS aponta a "saída padrão" para outro device.** Quem lê "o padrão"
-  durante a reprodução, inclusive o `system_profiler`, vê o volume do device errado. O player
-  nunca confia na saída padrão enquanto segura um device.
+The code works around two Core Audio pitfalls:
+- **The first volume change after a format reconfiguration is silently dropped.** The HAL returns
+  `noErr`, and the next read returns the requested value, served from a cache. The player checks
+  again with a delayed read; if an explicitly requested volume cannot be confirmed, it aborts
+  playback instead of playing at the wrong volume.
+- **While the device is held, macOS points the "default output" to another device.** Anything
+  that reads the default output during playback, including `system_profiler`, sees the volume of
+  the wrong device. That is why the player never relies on the default output while it holds a
+  device.
 
-## Afinação (`--tuning`)
+## Tuning (`--tuning`)
 
-Um segundo modo de reprodução, que aplica uma curva de resposta em frequência escolhida por você.
-**Ligado, a saída deixa de ser bit-perfect**, porque aplicar um filtro é mudar cada amostra. O
-hog mode e o rate travado continuam valendo.
+A second playback mode that applies a frequency-response curve of your choice. **With tuning on,
+the output is no longer bit-perfect**, because applying a filter means changing every sample. Hog
+mode and the locked sample rate still apply.
 
-A curva é um arquivo de texto com uma frequência e um ganho por linha. CSV de medição funciona
-direto, e `#` comenta:
+The curve is a text file with one frequency and one gain per line. A CSV exported from a
+measurement works as is, and `#` starts a comment:
 
 ```
-# frequência (Hz)   ganho (dB)
+# frequency (Hz)   gain (dB)
 20      12.5
 1000    -0.6
 3200    10.0
 20000  -10.6
 ```
 
-- O filtro é um FIR de fase mínima de 4096 taps, desenhado pelo cepstro real da curva. A
-  resposta realizada fica a menos de 0,02 dB da pedida em toda a banda audível.
-- O preamp não é opcional: a curva inteira desce até o pico encostar em 0 dBFS, porque ganho
-  positivo em digital satura.
-- Num device inteiro, a volta de float usa dither TPDF.
-- O modo bit-perfect não passa por nenhuma linha da afinação
-  ([ADR 0001 do core](rust/docs/adr/0001-modo-afinado-ao-lado-do-bit-perfect.md)).
+- The filter is a 4096-tap minimum-phase FIR, designed from the curve's real cepstrum. The
+  resulting response stays within 0.02 dB of the requested one across the whole audible band.
+- The preamp is not optional: the whole curve is lowered until its peak touches 0 dBFS, because
+  positive gain in the digital domain clips.
+- On an integer-format device, the conversion back from float uses TPDF dither.
+- The bit-perfect mode does not run a single line of the tuning code
+  ([core ADR 0001](rust/docs/adr/0001-modo-afinado-ao-lado-do-bit-perfect.md), in Portuguese).
 
-## Como o bit-perfect é provado
+## How bit-perfect is proven
 
-É o que diferencia este projeto de um player comum: qualquer mudança no caminho do áudio tem de
-continuar passando nestas provas.
+This is what sets the project apart from an ordinary player: any change to the audio path has to
+keep passing these proofs.
 
 ```
 make verify FILE=testdata/t96_24.flac BITS=24
@@ -190,116 +203,121 @@ make verify-volume FILE=testdata/t96_24.flac
 make verify-lossy FILE=testdata/t44_aac.m4a
 ```
 
-- **`verify`:** compara amostra por amostra os bytes que o player mandaria ao DAC com o PCM que o
-  ffmpeg extrai do mesmo arquivo. O ffmpeg é o oráculo, uma implementação independente. Vale
-  para arquivo estéreo em rate que o device suporte.
-- **`verify-pause`:** o fluxo com uma pausa no meio sai idêntico ao fluxo sem pausa; nenhum byte
-  é perdido nem repetido.
-- **`verify-volume`:** as amostras gravadas são idênticas com o volume a 20% e a 90%; o volume
-  muda no device, nunca no sinal.
-- **`verify-lossy`:** no AAC e no MP3, o dump bate byte a byte com o mesmo arquivo decodificado
-  pelo `afconvert`, que usa o mesmo decodificador da Apple. Prova que o app não acrescenta nada
-  depois do decodificador. Vale para arquivo estéreo.
+- **`verify`:** compares, sample by sample, the bytes the player would send to the DAC with the
+  PCM that ffmpeg extracts from the same file. ffmpeg is the oracle, an independent
+  implementation. It applies to stereo files at a rate the device supports.
+- **`verify-pause`:** the stream with a pause in the middle comes out identical to the stream
+  without one; no byte is lost or repeated.
+- **`verify-volume`:** the recorded samples are identical with the volume at 20% and at 90%; the
+  volume changes on the device, never in the signal.
+- **`verify-lossy`:** for AAC and MP3, the player's output matches, byte for byte, the same file
+  decoded by `afconvert`, which uses the same Apple decoder. It proves the app adds nothing after
+  the decoder. It applies to stereo files.
 
-O limite delas: todas rodam pelo modo `--dump`, que passa pelo decodificador, pelo ring buffer e
-pelo alinhamento de frame, mas não executa o callback de tempo real. Por isso o `io_proc` tem
-testes próprios em `rust/src/playback.rs`, chamado direto com um `AudioBufferList` sintético.
+Their limit: all of them run in `--dump` mode, which goes through the decoder, the ring buffer and
+frame alignment, but does not run the real-time callback. That is why `io_proc` has its own tests,
+in `rust/src/playback.rs`, which call it directly with a synthetic `AudioBufferList`.
 
-As fixtures de teste não são versionadas: `make fixtures` as gera com o ffmpeg e o `afconvert`.
+The test audio files are not in the repository: `make fixtures` generates them with ffmpeg and
+`afconvert`.
 
-## Proteção contra ruído
+## Protection against noise
 
-Se o formato que o decodificador produz não for exatamente o que o DAC espera, o resultado não é
-uma distorção leve: é ruído branco em volume total. Três barreiras impedem isso:
-1. O tamanho do frame vem do próprio device, nunca de `bitsPerChannel / 8`: amostras de 24 bits
-   podem morar em containers de 32.
-2. Depois de configurar a entrega, o formato que o decodificador de fato assumiu é relido e
-   comparado com o do device. Se divergir, o player para antes de tocar.
-3. No callback, todo byte enviado é dado do arquivo ou zero. Buffer curto, canal excedente ou
-   pedido maior que o previsto viram silêncio, nunca memória não inicializada.
+If the format the decoder produces is not exactly what the DAC expects, the result is not a mild
+distortion: it is white noise at full volume. Three safeguards prevent it:
+1. The frame size comes from the device itself, never from `bitsPerChannel / 8`, because 24-bit
+   samples may sit in 32-bit containers.
+2. After setting up delivery, the player reads back the format the decoder actually adopted and
+   compares it with the device's. If they differ, it stops before playing.
+3. In the callback, every byte sent is either file data or zero. A short buffer, an extra channel
+   or a larger request than expected becomes silence, never uninitialized memory.
 
-## Por que float32 continua sendo bit-perfect
+## Why float32 is still bit-perfect
 
-As saídas internas do Apple Silicon só publicam formatos float32. Isso não compromete a
-integridade: float32 tem 24 bits de mantissa, então todo inteiro de até 24 bits é representado
-exatamente, e a ida e a volta devolvem o mesmo valor. Arquivos acima de 24 bits são recusados
-num device float32. Num AAC ou MP3, o decodificador já entrega float32, que vai ao device sem
-conversão.
+The built-in outputs of Apple Silicon Macs only accept float32. That does not compromise
+integrity: float32 has a 24-bit mantissa, so every integer up to 24 bits is represented exactly,
+and the round trip returns the same value. Files above 24 bits are refused on a float32 device.
+For AAC and MP3, the decoder already delivers float32, which goes to the device unconverted.
 
-## Se o processo morrer
+## If the process dies
 
-O modo exclusivo pertence ao PID, e o `coreaudiod` o devolve quando o processo termina, mesmo
-com `kill -9`. O Mac nunca fica mudo:
-- **Fim da faixa, Ctrl+C, `SIGTERM`, `SIGHUP` ou `SIGQUIT`:** o player devolve o modo exclusivo
-  e restaura o rate.
-- **`SIGKILL` ou crash:** o sistema devolve o modo exclusivo, mas o rate fica no último usado.
-  Tocar qualquer outra coisa ou abrir o Configuração de Áudio e MIDI corrige.
+Exclusive mode belongs to the process, and `coreaudiod` releases it when the process ends, even
+with `kill -9`. The Mac never goes silent:
+- **End of track, Ctrl+C, `SIGTERM`, `SIGHUP` or `SIGQUIT`:** the player releases exclusive mode
+  and restores the sample rate.
+- **`SIGKILL` or a crash:** the system releases exclusive mode, but the sample rate stays at the
+  last one used. To fix it, play anything else or adjust it in Audio MIDI Setup.
 
-## Limites conhecidos
+## Known limitations
 
-- **Sem resample:** rate que o device não suporta é recusado, por escolha.
-- **Sem gapless:** cada troca de faixa solta e retoma o device, e pode trocar o rate do DAC.
-- **Fila básica:** sem seek, aleatório, repetição ou reordenação.
-- **Troca de saída:** plugar ou tirar o fone no meio da faixa não migra o áudio; tirar o fone
-  para a reprodução e avisa na tela.
-- **WAV, AIFF e CAF float de 32 bits** são recusados por engano num device float32 (ver o
-  [ROADMAP](docs/ROADMAP.md)).
-- **Fone de alta impedância:** a saída que ajusta a tensão existe no MacBook Pro 14"/16" (2021) em
-  diante, no MacBook Air M2 e no Mac Studio. O MacBook Air M1 não a tem.
+- **No resampling:** a track at a rate the device does not support is refused, by choice.
+- **No gapless playback:** on every track change, the player releases and retakes the device, and
+  may switch the DAC's sample rate.
+- **Basic queue:** no seeking within a track, shuffle, repeat or reordering.
+- **Output changes:** plugging in headphones mid-track does not move the sound to them; unplugging
+  them stops playback and shows a warning.
+- **32-bit float WAV, AIFF and CAF** files are wrongly refused on a float32 device (see the
+  [ROADMAP](docs/ROADMAP.md), in Portuguese).
+- **High-impedance headphones:** the output that raises the voltage for them exists on the
+  MacBook Pro 14"/16" (2021) and later, the MacBook Air M2 and the Mac Studio. The MacBook Air M1
+  does not have it.
 
-O que vem a seguir está no [ROADMAP](docs/ROADMAP.md).
+What comes next is in the [ROADMAP](docs/ROADMAP.md) (in Portuguese).
 
-## Estrutura
+## Structure
 
-Duas linguagens, cada uma com um papel ([ADR 0002](docs/adr/0002-consolidar-o-core-em-rust.md)):
-
-```
-rust/      o core inteiro: HAL, formato, ring buffer, IOProc, decodificação e a CLI
-apps/      o app SwiftUI (apps/player), que fala com o core por uniffi, e um protótipo em GPUI
-tools/     verificador de bit-perfect, gerador de fixtures, ícone e instalação
-logos/     a logo e o ícone em SVG
-docs/      ROADMAP, ADRs e o registro dos trabalhos
-```
-
-O core, por módulo:
+Two languages, each with one role
+([ADR 0002](docs/adr/0002-consolidar-o-core-em-rust.md), in Portuguese):
 
 ```
-rust/src/format.rs       decide rate e formato; puro, sem Core Audio
-rust/src/volume.rs       interpreta o volume pedido e o teto; puro
-rust/src/transitions.rs  regras da máquina de estados; puras
-rust/src/ring.rs         fila sem locks entre o decodificador e a thread de tempo real
-rust/src/source.rs       decodificação pelo ExtAudioFile
-rust/src/device.rs       HAL: modo exclusivo, lock de formato, volume, IOProc, restauração
-rust/src/playback.rs     o estado que o IOProc lê e o próprio callback de tempo real
-rust/src/engine.rs       a casca imperativa: hardware, arquivo e threads
-rust/src/api.rs          a superfície uniffi que o Swift enxerga, só controle
-rust/src/main.rs         a CLI
+rust/      the whole core: HAL, format, ring buffer, IOProc, decoding and the CLI
+apps/      the SwiftUI app (apps/player), which talks to the core through uniffi, and a GPUI prototype
+tools/     bit-perfect verifier, test file generator, icon and install scripts
+logos/     the logo and icon as SVG
+docs/      ROADMAP, ADRs and the record of past work
 ```
 
-A decisão de "isto pode tocar sem perda?" fica isolada do hardware, em código puro: é a regra que
-mais importa e a única que dá para verificar sem plugar um fone.
-
-## Desenvolvimento
-
-Num clone limpo, gere primeiro os arquivos de teste; o áudio não entra no repositório:
+The core, by module:
 
 ```
-make fixtures    # gera testdata/ com ffmpeg e afconvert
-make test        # fmt, clippy e os testes do core e do app
-make hw-test     # os testes que tomam o device de verdade, em série (tocam tons)
-make app         # monta apps/player/HogAudio.app sem instalar
+rust/src/format.rs       decides the sample rate and format; pure code, no Core Audio
+rust/src/volume.rs       interprets the requested volume and the ceiling; pure code
+rust/src/transitions.rs  state machine rules; pure code
+rust/src/ring.rs         lock-free queue between the decoder and the real-time thread
+rust/src/source.rs       decoding through ExtAudioFile
+rust/src/device.rs       HAL: exclusive mode, format lock, volume, IOProc, restore
+rust/src/playback.rs     the state the IOProc reads and the real-time callback itself
+rust/src/engine.rs       the layer that coordinates hardware, files and threads
+rust/src/api.rs          the uniffi interface the Swift app sees, control only
+rust/src/main.rs         the CLI
 ```
 
-O `make test` usa `clippy -D warnings` como gate, não como sugestão: o `unsafe` do HAL e do
-IOProc é onde moram os defeitos caros deste projeto. Teste que depende de fixture e não a acha
-reprova, dizendo qual comando rodar.
+The decision "can this play without loss?" is kept apart from the hardware, in pure code: it is
+the rule that matters most and the only one that can be checked without plugging in headphones.
 
-O IOProc roda em thread de tempo real: dentro dele só existem cópia de memória e operações
-atômicas, nada de alocar, travar ou imprimir. Quem mexer nesse caminho começa pelo comentário no
-topo de `rust/src/playback.rs`.
+## Development
 
-## Licença
+In a fresh clone, generate the test files first; audio is not stored in the repository:
 
-[MIT](LICENSE). O código de terceiros mantém a própria licença: `apps/gpui/vendor/gpui_macos`
-(Apache-2.0, do Zed) e os trechos do protótipo adaptados do Pawse (MIT, com o aviso no próprio
-arquivo).
+```
+make fixtures    # generates testdata/ with ffmpeg and afconvert
+make test        # fmt, clippy and the core and app tests
+make hw-test     # the tests that take the real device, one at a time (they play tones)
+make app         # builds apps/player/HogAudio.app without installing it
+```
+
+`make test` treats `clippy -D warnings` as a hard rule, not a suggestion: the `unsafe` code in the
+HAL and the IOProc is where this project's most expensive bugs live. A test that depends on a
+missing test file fails and says which command to run.
+
+The IOProc runs on a real-time thread: inside it there is only memory copying and atomic
+operations, never allocation, locking or printing. Anyone changing that path should start with
+the comment at the top of `rust/src/playback.rs`.
+
+Code comments, docs and commit messages are in Brazilian Portuguese.
+
+## License
+
+[MIT](LICENSE). Third-party code keeps its own license: `apps/gpui/vendor/gpui_macos`
+(Apache-2.0, from Zed) and the prototype code adapted from Pawse (MIT, with the notice in the file
+itself).
