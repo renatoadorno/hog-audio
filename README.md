@@ -15,9 +15,12 @@ Ou pelo Makefile, que é como o resto deste documento chama:
 ## O que ele faz
 
 1. Lê o formato real do arquivo com o decodificador do próprio macOS — FLAC, ALAC, WAV,
-   AIFF, CAF, AAC e MP3, sem biblioteca externa.
-2. Enumera o que o device de saída aceita e decide se existe caminho sem perda. **Se não
-   existir, recusa tocar** em vez de resamplear em silêncio.
+   AIFF, CAF, AAC-LC e MP3, sem biblioteca externa.
+2. Enumera o que o device de saída aceita e decide se existe caminho em que o app não altere
+   nenhuma amostra do que o decodificador entrega. **Se não existir, recusa tocar** em vez de
+   resamplear ou arredondar em silêncio. Num arquivo sem perda isso é bit-perfect; num AAC ou
+   MP3, a única perda é a da compressão
+   ([ADR 0002 do core](rust/docs/adr/0002-arquivo-com-perda-sem-perda-do-app.md)).
 3. Toma o device em modo exclusivo (`kAudioDevicePropertyHogMode`). Enquanto toca, nenhum
    outro aplicativo consegue emitir som.
 4. Trava o device no sample rate do arquivo. O DAC muda fisicamente de frequência.
@@ -90,6 +93,11 @@ coisa, e é o que este programa evita:
 
 Para arquivos acima de 24 bits o programa recusa o formato float32, porque aí a conversão
 deixaria de ser exata.
+
+AAC e MP3 não têm profundidade de bits: o decodificador da Apple entrega float32, e é esse
+float32 que vai ao device, sem conversão. Por isso a faixa com perda só toca quando o device tem
+um formato físico float32 no rate do arquivo; arredondá-la para inteiro seria perda acrescentada
+pelo app. A tela mostra codec e bitrate ("AAC 256") no lugar dos bits.
 
 ## Afinação (`--tuning`)
 
@@ -172,6 +180,9 @@ alterado, corrigível tocando qualquer outra coisa ou pelo Configuração de Áu
   mas não há ganho de tensão para fones pesados.
 - **Sem resample, por escolha**: um arquivo de 192 kHz num device que vai até 96 kHz é
   recusado, com a lista de rates suportados.
+- **Com perda, só AAC-LC e MP3**: HE-AAC, Opus e os outros codecs com perda são recusados, com
+  o nome do codec na mensagem. AAC e MP3 em rate que o device não suporta (22,05 ou 32 kHz no
+  fone do Mac) também, pela mesma regra de não resamplear.
 - **Fila de reprodução**, com Previous/Next, auto-avanço e pausa. Seek continua fora de escopo.
 - **Trocar de modo reinicia a faixa**: o formato de entrega é decidido na partida do stream, e
   retomar da posição atual depende de `ExtAudioFileSeek`, que ainda não existe.
@@ -284,6 +295,17 @@ do IOProc continua intacta —, só marca onde a cobertura para: o callback de t
 só é validado ouvindo a reprodução de verdade ou lendo o código com cuidado. É a razão de os
 sete testes de `playback.rs` chamarem o `io_proc` diretamente, com um `AudioBufferList`
 sintético: sem device, mas exercitando o callback de verdade.
+
+A faixa com perda tem uma prova própria:
+
+```
+make verify-lossy FILE=testdata/t44_aac.m4a
+```
+
+Ela compara o dump byte a byte com o mesmo arquivo decodificado pelo `afconvert` em float32. O
+ffmpeg não serve de oráculo aqui: o decodificador de AAC e MP3 dele difere do da Apple nos
+últimos bits. Como o `afconvert` usa o mesmo decodificador da Apple, a prova garante que o app
+não acrescenta nada depois do decodificador, e não que o decodificador esteja certo.
 
 ## Estrutura
 

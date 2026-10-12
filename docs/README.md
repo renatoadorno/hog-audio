@@ -32,7 +32,7 @@ atualize para refletir o presente — quando o desenho muda, o lugar de escrever
 | Port para Rust (16/08) | [design](superpowers/specs/2026-08-16-port-rust-design.md) · [resultado](superpowers/specs/2026-08-16-port-rust-resultado.md) | [plano](superpowers/plans/2026-08-16-port-rust.md) |
 | Mini player SwiftUI (18/08) | [design](superpowers/specs/2026-08-18-mini-player-design.md) · [resultado](superpowers/specs/2026-08-18-mini-player-resultado.md) | [plano](superpowers/plans/2026-08-18-mini-player.md) |
 | Fila de faixas (19/08) | [design](superpowers/specs/2026-08-19-playlist-design.md) | — (não implementado) |
-| Áudio com perda: AAC e MP3 (11/10) | [design](superpowers/specs/2026-10-11-audio-com-perda-design.md) | — (a escrever) |
+| Áudio com perda: AAC e MP3 (11/10) | [design](superpowers/specs/2026-10-11-audio-com-perda-design.md) | [plano](superpowers/plans/2026-10-11-audio-com-perda.md) |
 
 Ao ler qualquer coisa em `superpowers/`, confira antes se um ADR já mudou a conclusão. O
 design do port, por exemplo, descreve as duas implementações convivendo em `cpp/` e `rust/`:

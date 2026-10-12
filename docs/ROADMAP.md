@@ -101,6 +101,9 @@ Decidido em 11/10/2026 (spec em
   decodificador da Apple. O ffmpeg não serve de oráculo para AAC e MP3.
 - **O README é corrigido junto com o código:** hoje ele diz que o core lê AAC e MP3.
 
+Implementado em 11/10/2026, na branch `feat/audio-com-perda`
+(plano em `docs/superpowers/plans/2026-10-11-audio-com-perda.md`).
+
 Para depois, com data de 11/10/2026:
 - **Resample:** uma lógica "inteligente", que resampleia só em casos específicos, a decidir. Os
   três caminhos levantados continuam na mesa:
