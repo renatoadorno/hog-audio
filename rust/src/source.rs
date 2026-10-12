@@ -5,7 +5,7 @@
 use coreaudio_sys::*;
 
 use crate::ffi::os_status_text;
-use crate::format::FileFormat;
+use crate::format::{FileFormat, Resolution};
 
 pub struct AudioSource {
     file: ExtAudioFileRef,
@@ -132,7 +132,7 @@ impl AudioSource {
             file,
             format: FileFormat {
                 sample_rate: asbd.mSampleRate,
-                bit_depth,
+                resolution: Resolution::Lossless { bits: bit_depth },
                 channels: asbd.mChannelsPerFrame,
             },
             total_frames,
@@ -246,7 +246,7 @@ mod tests {
         let f = source.format();
 
         assert_eq!(f.sample_rate, 96000.0);
-        assert_eq!(f.bit_depth, 24);
+        assert_eq!(f.resolution, Resolution::Lossless { bits: 24 });
         assert_eq!(f.channels, 2);
         assert_eq!(source.codec_name(), "flac");
         assert!(source.total_frames() > 0);

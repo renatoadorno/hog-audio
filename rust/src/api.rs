@@ -41,7 +41,10 @@ pub struct QueueItem {
 #[derive(uniffi::Record)]
 pub struct TrackFormat {
     pub sample_rate: f64,
-    pub bit_depth: u32,
+    /// `None` na faixa com perda: o arquivo não tem profundidade de bits (ADR 0002 do core).
+    pub bit_depth: Option<u32>,
+    /// Só na faixa com perda: o bitrate médio que o arquivo publica.
+    pub bitrate_kbps: Option<u32>,
     pub channels: u32,
     pub codec: String,
     pub device_name: String,
@@ -51,7 +54,10 @@ pub struct TrackFormat {
 #[derive(uniffi::Record)]
 pub struct TrackProbe {
     pub sample_rate: f64,
-    pub bit_depth: u32,
+    /// `None` na faixa com perda: o arquivo não tem profundidade de bits (ADR 0002 do core).
+    pub bit_depth: Option<u32>,
+    /// Só na faixa com perda: o bitrate médio que o arquivo publica.
+    pub bitrate_kbps: Option<u32>,
     pub channels: u32,
     pub codec: String,
     pub total_seconds: f64,
@@ -494,6 +500,7 @@ fn track_format(track: LoadedTrack) -> TrackFormat {
     TrackFormat {
         sample_rate: track.sample_rate,
         bit_depth: track.bit_depth,
+        bitrate_kbps: track.bitrate_kbps,
         channels: track.channels,
         codec: track.codec,
         device_name: track.device_name,
@@ -510,7 +517,8 @@ pub fn probe_track(path: String) -> Result<TrackProbe, PlayerError> {
     let format = source.format();
     Ok(TrackProbe {
         sample_rate: format.sample_rate,
-        bit_depth: format.bit_depth,
+        bit_depth: format.bit_depth(),
+        bitrate_kbps: format.bitrate_kbps(),
         channels: format.channels,
         codec: source.codec_name().to_string(),
         total_seconds: source.total_frames() as f64 / format.sample_rate,
@@ -689,7 +697,8 @@ mod tests {
     fn sondar_devolve_o_formato_que_o_engine_vai_ver() {
         let probe = probe_track(crate::fixtures::path("t96_24.flac")).expect("deveria sondar");
         assert_eq!(probe.sample_rate, 96_000.0);
-        assert_eq!(probe.bit_depth, 24);
+        assert_eq!(probe.bit_depth, Some(24));
+        assert_eq!(probe.bitrate_kbps, None);
         assert_eq!(probe.channels, 2);
         assert_eq!(probe.codec, "flac");
         assert!(

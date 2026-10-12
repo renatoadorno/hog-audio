@@ -32,11 +32,35 @@ pub struct SampleRateRange {
     pub maximum: f64,
 }
 
+/// A resolução do arquivo. A faixa com perda não tem profundidade de bits: o decodificador
+/// entrega float32, e o app não pode alterá-lo (ADR 0002 do core).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Resolution {
+    Lossless { bits: u32 },
+    Lossy { bitrate_kbps: Option<u32> },
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct FileFormat {
     pub sample_rate: f64,
-    pub bit_depth: u32,
+    pub resolution: Resolution,
     pub channels: u32,
+}
+
+impl FileFormat {
+    pub fn bit_depth(&self) -> Option<u32> {
+        match self.resolution {
+            Resolution::Lossless { bits } => Some(bits),
+            Resolution::Lossy { .. } => None,
+        }
+    }
+
+    pub fn bitrate_kbps(&self) -> Option<u32> {
+        match self.resolution {
+            Resolution::Lossless { .. } => None,
+            Resolution::Lossy { bitrate_kbps } => bitrate_kbps,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -115,10 +139,15 @@ fn rate_is_supported(rate: f64, rates: &[SampleRateRange]) -> bool {
 // perda. Acima disso a conversão deixaria de ser exata e o formato é recusado.
 const FLOAT_EXACT_BITS: u32 = 24;
 
-fn preserves_every_bit(fmt: &PhysicalFormatDesc, file_bit_depth: u32) -> bool {
-    match fmt.sample_type {
-        SampleType::Float => file_bit_depth <= FLOAT_EXACT_BITS,
-        SampleType::Integer => fmt.bits_per_channel >= file_bit_depth,
+// Com perda, o decodificador entrega float32: só um formato físico float32 o recebe sem que o
+// app arredonde nada (ADR 0002 do core).
+fn preserves_every_bit(fmt: &PhysicalFormatDesc, resolution: Resolution) -> bool {
+    const DECODER_FLOAT_BITS: u32 = 32;
+    match (resolution, fmt.sample_type) {
+        (Resolution::Lossless { bits }, SampleType::Float) => bits <= FLOAT_EXACT_BITS,
+        (Resolution::Lossless { bits }, SampleType::Integer) => fmt.bits_per_channel >= bits,
+        (Resolution::Lossy { .. }, SampleType::Float) => fmt.bits_per_channel == DECODER_FLOAT_BITS,
+        (Resolution::Lossy { .. }, SampleType::Integer) => false,
     }
 }
 
@@ -173,7 +202,7 @@ pub fn negotiate(file: &FileFormat, caps: &DeviceCaps) -> Decision {
         if !format_covers_rate(fmt, file.sample_rate) {
             continue;
         }
-        if !preserves_every_bit(fmt, file.bit_depth) {
+        if !preserves_every_bit(fmt, file.resolution) {
             continue;
         }
         best = match best {
@@ -184,11 +213,16 @@ pub fn negotiate(file: &FileFormat, caps: &DeviceCaps) -> Decision {
     }
 
     let Some(best) = best else {
-        d.reason = format!(
-            "nenhum formato físico do device em {} Hz comporta {} bits sem perda",
-            rate_text(file.sample_rate),
-            file.bit_depth
-        );
+        let rate = rate_text(file.sample_rate);
+        d.reason = match file.resolution {
+            Resolution::Lossless { bits } => format!(
+                "nenhum formato físico do device em {rate} Hz comporta {bits} bits sem perda"
+            ),
+            Resolution::Lossy { .. } => format!(
+                "nenhum formato físico do device em {rate} Hz é float32; entregar em inteiro \
+                 arredondaria o que o decodificador produziu"
+            ),
+        };
         return d;
     };
 
@@ -310,8 +344,37 @@ mod tests {
     fn file(rate: f64, bits: u32, channels: u32) -> FileFormat {
         FileFormat {
             sample_rate: rate,
-            bit_depth: bits,
+            resolution: Resolution::Lossless { bits },
             channels,
+        }
+    }
+
+    fn lossy(rate: f64) -> FileFormat {
+        FileFormat {
+            sample_rate: rate,
+            resolution: Resolution::Lossy {
+                bitrate_kbps: Some(256),
+            },
+            channels: 2,
+        }
+    }
+
+    // O fone e as caixas do MacBook Air M1: só float32, em quatro rates discretos.
+    fn mac_air_like() -> DeviceCaps {
+        DeviceCaps {
+            rates: vec![
+                discrete(44100.0),
+                discrete(48000.0),
+                discrete(88200.0),
+                discrete(96000.0),
+            ],
+            physical_formats: vec![
+                float_format(0, 44100.0),
+                float_format(1, 48000.0),
+                float_format(2, 88200.0),
+                float_format(3, 96000.0),
+            ],
+            output_channels: 2,
         }
     }
 
@@ -517,6 +580,79 @@ mod tests {
         };
 
         assert!(!negotiate(&file(44100.0, 24, 2), &caps).play);
+    }
+
+    // --- faixa com perda (ADR 0002 do core) ------------------------------------------
+
+    #[test]
+    fn com_perda_toca_em_float32_no_rate_do_arquivo() {
+        let d = negotiate(&lossy(48000.0), &mac_air_like());
+
+        assert!(d.play, "{}", d.reason);
+        assert_eq!(d.sample_rate, 48000.0);
+        assert_eq!(d.physical_format_index, 1);
+    }
+
+    #[test]
+    fn com_perda_escolhe_float_mesmo_com_inteiro_no_rate() {
+        let caps = DeviceCaps {
+            rates: vec![discrete(48000.0)],
+            physical_formats: vec![int_format(0, 48000.0, 24), float_format(1, 48000.0)],
+            output_channels: 2,
+        };
+
+        let d = negotiate(&lossy(48000.0), &caps);
+
+        assert!(d.play);
+        assert_eq!(d.physical_format_index, 1);
+    }
+
+    // Arredondar o float do decodificador para inteiro seria perda acrescentada pelo app.
+    #[test]
+    fn com_perda_em_device_so_inteiro_e_recusada() {
+        let d = negotiate(&lossy(44100.0), &built_in_like());
+
+        assert!(!d.play);
+        assert_eq!(d.physical_format_index, -1);
+        assert_eq!(
+            d.reason,
+            "nenhum formato físico do device em 44100 Hz é float32; entregar em inteiro \
+             arredondaria o que o decodificador produziu"
+        );
+    }
+
+    #[test]
+    fn com_perda_nao_aceita_float_de_outra_largura() {
+        let mut float64 = float_format(0, 44100.0);
+        float64.bits_per_channel = 64;
+        let caps = DeviceCaps {
+            rates: vec![discrete(44100.0)],
+            physical_formats: vec![float64],
+            output_channels: 2,
+        };
+
+        assert!(!negotiate(&lossy(44100.0), &caps).play);
+    }
+
+    // MP3 e AAC antigos em 22,05 kHz: a mesma recusa do FLAC de 192 kHz, até o resample existir.
+    #[test]
+    fn com_perda_em_rate_nao_suportado_e_recusada_por_resample() {
+        let d = negotiate(&lossy(22050.0), &mac_air_like());
+
+        assert!(!d.play);
+        assert_eq!(
+            d.reason,
+            "arquivo em 22050 Hz; o device suporta: 44100, 48000, 88200, 96000. Reproduzir \
+             exigiria resample."
+        );
+    }
+
+    #[test]
+    fn sem_perda_continua_tocando_no_device_so_float32() {
+        let d = negotiate(&file(44100.0, 16, 2), &mac_air_like());
+
+        assert!(d.play);
+        assert_eq!(d.physical_format_index, 0);
     }
 
     // --- validação do formato de entrega ---------------------------------------------

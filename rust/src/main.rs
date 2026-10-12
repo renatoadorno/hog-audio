@@ -37,10 +37,23 @@ fn interrupted() -> bool {
 fn print_track_report(path: &str, track: &LoadedTrack) {
     println!("arquivo  : {path}");
     println!(
-        "fonte    : {} {} Hz / {} bits / {} canais / {:.1} s",
-        track.codec, track.sample_rate, track.bit_depth, track.channels, track.total_seconds
+        "fonte    : {} {} Hz / {} / {} canais / {:.1} s",
+        track.codec,
+        track.sample_rate,
+        resolution_text(track),
+        track.channels,
+        track.total_seconds
     );
     println!("device   : {}", track.device_name);
+}
+
+/// "24 bits" no arquivo sem perda; "339 kbps" no com perda, que não tem bits a mostrar.
+fn resolution_text(track: &LoadedTrack) -> String {
+    match (track.bit_depth, track.bitrate_kbps) {
+        (Some(bits), _) => format!("{bits} bits"),
+        (None, Some(kbps)) => format!("{kbps} kbps"),
+        (None, None) => "com perda".to_string(),
+    }
 }
 
 fn describe_format(f: &AudioStreamBasicDescription) -> String {

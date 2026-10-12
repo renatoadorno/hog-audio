@@ -46,7 +46,10 @@ const LIVE_CHECK_WITHOUT_WATCH: std::time::Duration = std::time::Duration::from_
 #[derive(Debug)]
 pub struct LoadedTrack {
     pub sample_rate: f64,
-    pub bit_depth: u32,
+    /// `None` na faixa com perda, que não tem profundidade de bits.
+    pub bit_depth: Option<u32>,
+    /// Só na faixa com perda: o bitrate médio que o arquivo publica.
+    pub bitrate_kbps: Option<u32>,
     pub channels: u32,
     pub codec: String,
     pub device_name: String,
@@ -388,7 +391,8 @@ impl Engine {
 
         Ok(LoadedTrack {
             sample_rate: file_format.sample_rate,
-            bit_depth: file_format.bit_depth,
+            bit_depth: file_format.bit_depth(),
+            bitrate_kbps: file_format.bitrate_kbps(),
             channels: file_format.channels,
             codec,
             device_name,
@@ -2111,7 +2115,8 @@ mod tests {
 
         assert_eq!(engine.state(), PlayerState::Loaded);
         assert_eq!(track.sample_rate, 96000.0);
-        assert_eq!(track.bit_depth, 24);
+        assert_eq!(track.bit_depth, Some(24));
+        assert_eq!(track.bitrate_kbps, None);
         assert_eq!(track.channels, 2);
         assert_eq!(track.codec, "flac");
         assert!(!track.device_name.is_empty());
