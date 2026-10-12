@@ -709,6 +709,17 @@ mod tests {
     }
 
     #[test]
+    fn sondar_aac_devolve_bitrate_sem_bit_depth() {
+        let probe =
+            probe_track(crate::fixtures::path("t44_aac.m4a")).expect("deveria sondar o AAC");
+
+        assert_eq!(probe.bit_depth, None);
+        assert!(probe.bitrate_kbps.is_some_and(|kbps| kbps > 0));
+        assert_eq!(probe.codec, "aac");
+        assert_eq!(probe.sample_rate, 44_100.0);
+    }
+
+    #[test]
     fn sondar_arquivo_que_nao_abre_e_falha_de_carga() {
         let result = probe_track("/tmp/hog-audio-nao-existe-sonda.flac".to_string());
         assert!(matches!(result, Err(PlayerError::Load { .. })));

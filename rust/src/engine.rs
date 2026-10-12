@@ -2126,6 +2126,26 @@ mod tests {
 
     #[test]
     #[ignore = "precisa de um device de saída real"]
+    fn load_de_aac_negocia_float32_no_rate_do_arquivo() {
+        let engine = Engine::new();
+        let track = engine
+            .load(&crate::fixtures::path("t44_aac.m4a"))
+            .expect("deveria carregar o AAC");
+
+        assert_eq!(engine.state(), PlayerState::Loaded);
+        assert_eq!(track.bit_depth, None);
+        assert!(track.bitrate_kbps.is_some());
+        let report = engine.device_report().expect("deveria ter negociado");
+        assert!(
+            report.negotiated.starts_with("44100 Hz"),
+            "{}",
+            report.negotiated
+        );
+        assert!(report.negotiated.contains("float"), "{}", report.negotiated);
+    }
+
+    #[test]
+    #[ignore = "precisa de um device de saída real"]
     fn carregar_de_novo_substitui_a_faixa_anterior() {
         let a = crate::fixtures::path("t96_24.flac");
         let b = crate::fixtures::path("t44_16.flac");
