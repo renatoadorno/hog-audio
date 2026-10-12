@@ -12,5 +12,25 @@
     <key>CFBundleVersion</key><string>1</string>
     <key>LSMinimumSystemVersion</key><string>14.0</string>
     <key>NSHighResolutionCapable</key><true/>
+    <key>CFBundleDocumentTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleTypeName</key><string>Áudio</string>
+            <key>CFBundleTypeRole</key><string>Viewer</string>
+            <key>LSHandlerRank</key><string>Alternate</string>
+            <key>LSItemContentTypes</key>
+            <array>
+                <string>public.audio</string>
+                <string>public.mp3</string>
+                <string>public.mpeg-4-audio</string>
+                <string>com.apple.m4a-audio</string>
+                <string>org.xiph.flac</string>
+                <string>com.microsoft.waveform-audio</string>
+                <string>public.aiff-audio</string>
+                <string>public.aifc-audio</string>
+                <string>com.apple.coreaudio-format</string>
+            </array>
+        </dict>
+    </array>
 </dict>
 </plist>

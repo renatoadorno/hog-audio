@@ -44,6 +44,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         true
     }
 
+    // Duplo clique, "Abrir com" e arrastar para o ícone no Dock chegam aqui, com o app fechado
+    // ou aberto. O mesmo caminho do ⌘O e do arrastar para a janela: acrescenta ao fim da fila.
+    func application(_ application: NSApplication, open urls: [URL]) {
+        model.add(urls: urls)
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         // Sem isto o device fica travado no rate e no formato da última faixa.
         model.shutdown()
